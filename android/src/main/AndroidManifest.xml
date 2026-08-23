@@ -1,0 +1,18 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <application>
+    <provider
+      android:name="com.margelo.nitro.pushsignal.PushSignalInitProvider"
+      android:authorities="${applicationId}.pushsignal.init"
+      android:exported="false" />
+
+    <service
+      android:name="com.margelo.nitro.pushsignal.PushSignalMessagingService"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="com.google.firebase.MESSAGING_EVENT" />
+      </intent-filter>
+    </service>
+  </application>
+</manifest>

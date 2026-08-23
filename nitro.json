@@ -1,0 +1,23 @@
+{
+  "cxxNamespace": ["pushsignal"],
+  "ios": {
+    "iosModuleName": "PushSignal"
+  },
+  "android": {
+    "androidNamespace": ["pushsignal"],
+    "androidCxxLibName": "pushsignal"
+  },
+  "autolinking": {
+    "PushSignal": {
+      "ios": {
+        "language": "swift",
+        "implementationClassName": "PushSignal"
+      },
+      "android": {
+        "language": "kotlin",
+        "implementationClassName": "PushSignal"
+      }
+    }
+  },
+  "ignorePaths": ["node_modules"]
+}
