@@ -46,28 +46,6 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     captureLaunchNotificationIfNeeded()
   }
 
-  func permissionStatus() async -> PermissionStatus {
-    await withCheckedContinuation { continuation in
-      UNUserNotificationCenter.current().getNotificationSettings { settings in
-        continuation.resume(returning: Self.map(settings.authorizationStatus))
-      }
-    }
-  }
-
-  func requestPermission() async -> PermissionStatus {
-    do {
-      let granted = try await UNUserNotificationCenter.current()
-        .requestAuthorization(options: [.alert, .badge, .sound])
-      if granted {
-        return await permissionStatus()
-      }
-
-      return await permissionStatus()
-    } catch {
-      return .denied
-    }
-  }
-
   func fetchCredentials() async throws -> PushCredentials {
     await MainActor.run {
       self.installOnMain()
@@ -264,19 +242,6 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
       return .production
     default:
       return nil
-    }
-  }
-
-  private static func map(_ status: UNAuthorizationStatus) -> PermissionStatus {
-    switch status {
-    case .authorized, .provisional, .ephemeral:
-      return .authorized
-    case .denied:
-      return .denied
-    case .notDetermined:
-      return .notdetermined
-    @unknown default:
-      return .denied
     }
   }
 

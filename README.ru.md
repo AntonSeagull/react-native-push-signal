@@ -2,7 +2,7 @@
 
 [English](README.md) | Русский
 
-Библиотека запрашивает разрешение на пуши, отдаёт токен устройства для вашего сервера и сообщает о входящем уведомлении или нажатии на него. Сами пуши она не отправляет — в APNs и FCM ходит бэкенд.
+Библиотека отдаёт токен устройства для вашего сервера и сообщает о входящем уведомлении или нажатии на него. Сами пуши она не отправляет — в APNs и FCM ходит бэкенд. Разрешение на уведомления запрашивайте сами через [`react-native-permissions`](https://github.com/zoontek/react-native-permissions).
 
 ## Установка
 
@@ -16,23 +16,29 @@ npm install react-native-push-signal react-native-nitro-modules
 
 ```ts
 import {
+  checkNotifications,
+  requestNotifications,
+  RESULTS,
+} from 'react-native-permissions';
+import {
   getCredentials,
-  getPermissionStatus,
   initialize,
   onMessage,
   onNotificationPress,
-  requestPermission,
 } from 'react-native-push-signal';
 
-initialize({
-  projectId: 'my-project',
-  applicationId: '1:123456789:android:abcd',
-  apiKey: 'AIza...',
-  gcmSenderId: '123456789',
+await initialize({
+  project_id: 'my-project',
+  mobilesdk_app_id: '1:123456789:android:abcd',
+  current_key: 'AIza...',
+  project_number: '123456789',
 });
 
-const status = await getPermissionStatus();
-const afterRequest = await requestPermission();
+const { status } = await checkNotifications();
+if (status !== RESULTS.GRANTED) {
+  await requestNotifications(['alert', 'badge', 'sound']);
+}
+
 const credentials = await getCredentials();
 // POST credentials на сервер: { platform, token, environment? }
 
@@ -75,15 +81,15 @@ const stopPress = onNotificationPress((message) => {
 Вызовите `initialize` со значениями из `google-services.json` (не из service account):
 
 ```ts
-initialize({
-  projectId: '...', // project_id
-  applicationId: '...', // mobilesdk_app_id
-  apiKey: '...', // current_key
-  gcmSenderId: '...', // project_number
+await initialize({
+  project_id: '...',
+  mobilesdk_app_id: '...',
+  current_key: '...',
+  project_number: '...',
 });
 ```
 
-Нужны все четыре поля. Если чего-то нет, `initialize` тихо ничего не делает и не бросает ошибку. На iOS вызов игнорируется.
+Нужны все четыре поля. Если чего-то нет, `initialize` резолвится и ничего не делает. На iOS конфиг игнорируется, промис всё равно резолвится.
 
 Service account Firebase оставляйте на сервере. В приложение его класть нельзя.
 
@@ -100,7 +106,7 @@ apply plugin: "com.google.gms.google-services"
 
 3. Добавьте classpath плагина в `android/build.gradle` / `settings.gradle` по [инструкции Firebase для Android](https://firebase.google.com/docs/android/setup).
 
-Без `initialize(...)` или этого файла `getCredentials()` бросит ошибку. Разрешение на уведомления (`POST_NOTIFICATIONS`) запрашивается на API 33+.
+Без `initialize(...)` или этого файла `getCredentials()` бросит ошибку.
 
 Если в хост-приложении уже есть свой `FirebaseMessagingService`, обработать `com.google.firebase.MESSAGING_EVENT` может только один сервис. Оставьте сервис этой библиотеки или пробрасывайте события в него.
 
@@ -112,7 +118,7 @@ apply plugin: "com.google.gms.google-services"
 
 ## Web
 
-Методы разрешения возвращают `denied`. `getCredentials()` бросает ошибку. Слушатели ничего не делают.
+`initialize()` резолвится. `getCredentials()` бросает ошибку. Слушатели ничего не делают.
 
 ## Contributing
 

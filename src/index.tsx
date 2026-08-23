@@ -1,6 +1,5 @@
 export type {
   AndroidFirebaseConfig,
-  PermissionStatus,
   PushCredentials,
   PushEnvironment,
   PushMessage,
@@ -8,9 +7,7 @@ export type {
 } from './PushSignal.nitro';
 export {
   getCredentials,
-  getPermissionStatus,
   initialize,
   onMessage,
   onNotificationPress,
-  requestPermission,
 } from './pushSignal';

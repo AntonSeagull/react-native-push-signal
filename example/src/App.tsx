@@ -9,17 +9,14 @@ import {
 } from 'react-native';
 import {
   getCredentials,
-  getPermissionStatus,
+  initialize,
   onMessage,
   onNotificationPress,
-  requestPermission,
-  type PermissionStatus,
   type PushCredentials,
   type PushMessage,
 } from 'react-native-push-signal';
 
 export default function App() {
-  const [status, setStatus] = useState<PermissionStatus | 'unknown'>('unknown');
   const [credentials, setCredentials] = useState<PushCredentials | null>(null);
   const [log, setLog] = useState<string[]>([]);
 
@@ -45,31 +42,20 @@ export default function App() {
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
         <Text style={styles.title}>Push Signal</Text>
-        <Text style={styles.row}>Permission: {status}</Text>
         <Text style={styles.row}>
           Credentials: {credentials ? JSON.stringify(credentials) : 'none'}
         </Text>
         <View style={styles.actions}>
           <Action
-            label="Check permission"
-            onPress={async () => {
-              const next = await getPermissionStatus();
-              setStatus(next);
-              append(`status: ${next}`);
-            }}
-          />
-          <Action
-            label="Request permission"
-            onPress={async () => {
-              const next = await requestPermission();
-              setStatus(next);
-              append(`request: ${next}`);
-            }}
-          />
-          <Action
             label="Get credentials"
             onPress={async () => {
               try {
+                await initialize({
+                  project_id: 'my-project',
+                  mobilesdk_app_id: '1:123456789:android:abcd',
+                  current_key: 'AIza...',
+                  project_number: '123456789',
+                });
                 const next = await getCredentials();
                 setCredentials(next);
                 append(`credentials: ${JSON.stringify(next)}`);

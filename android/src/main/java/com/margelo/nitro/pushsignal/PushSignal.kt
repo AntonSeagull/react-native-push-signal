@@ -5,20 +5,14 @@ import com.margelo.nitro.core.Promise
 
 @DoNotStrip
 class PushSignal : HybridPushSignalSpec() {
-  override fun initialize(config: AndroidFirebaseConfig) {
-    PushSignalCenter.initialize(config)
-  }
-
-  override fun getPermissionStatus(): Promise<PermissionStatus> {
-    return Promise.async {
-      PushSignalCenter.getPermissionStatus()
-    }
-  }
-
-  override fun requestPermission(): Promise<PermissionStatus> {
-    val promise = Promise<PermissionStatus>()
-    PushSignalCenter.requestPermission { status ->
-      promise.resolve(status)
+  override fun initialize(config: AndroidFirebaseConfig): Promise<Unit> {
+    val promise = Promise<Unit>()
+    PushSignalCenter.initialize(config) { error ->
+      if (error == null) {
+        promise.resolve(Unit)
+      } else {
+        promise.reject(error)
+      }
     }
     return promise
   }
@@ -27,7 +21,7 @@ class PushSignal : HybridPushSignalSpec() {
     return Promise.async {
       val token = PushSignalCenter.fetchToken()
       PushCredentials(
-        PushPlatform.ANDROID,
+        PushPlatform.ANDROID_OS,
         token,
         null
       )

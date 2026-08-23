@@ -6,19 +6,10 @@ class PushSignal: HybridPushSignalSpec {
     PushSignalCenter.shared.install()
   }
 
-  func initialize(config: AndroidFirebaseConfig) throws {
+  func initialize(config: AndroidFirebaseConfig) throws -> Promise<Void> {
     _ = config
-  }
-
-  func getPermissionStatus() throws -> Promise<PermissionStatus> {
     return Promise.async {
-      await PushSignalCenter.shared.permissionStatus()
-    }
-  }
-
-  func requestPermission() throws -> Promise<PermissionStatus> {
-    return Promise.async {
-      await PushSignalCenter.shared.requestPermission()
+      ()
     }
   }
 

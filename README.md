@@ -2,7 +2,7 @@
 
 English | [Русский](README.ru.md)
 
-Get push permission, device credentials for your server, and listen for incoming notifications or taps. The library does not send pushes — your backend talks to APNs and FCM.
+Get device credentials for your server and listen for incoming notifications or taps. The library does not send pushes — your backend talks to APNs and FCM. Request notification permission yourself with [`react-native-permissions`](https://github.com/zoontek/react-native-permissions).
 
 ## Installation
 
@@ -16,23 +16,29 @@ npm install react-native-push-signal react-native-nitro-modules
 
 ```ts
 import {
+  checkNotifications,
+  requestNotifications,
+  RESULTS,
+} from 'react-native-permissions';
+import {
   getCredentials,
-  getPermissionStatus,
   initialize,
   onMessage,
   onNotificationPress,
-  requestPermission,
 } from 'react-native-push-signal';
 
-initialize({
-  projectId: 'my-project',
-  applicationId: '1:123456789:android:abcd',
-  apiKey: 'AIza...',
-  gcmSenderId: '123456789',
+await initialize({
+  project_id: 'my-project',
+  mobilesdk_app_id: '1:123456789:android:abcd',
+  current_key: 'AIza...',
+  project_number: '123456789',
 });
 
-const status = await getPermissionStatus();
-const afterRequest = await requestPermission();
+const { status } = await checkNotifications();
+if (status !== RESULTS.GRANTED) {
+  await requestNotifications(['alert', 'badge', 'sound']);
+}
+
 const credentials = await getCredentials();
 // POST credentials to your server: { platform, token, environment? }
 
@@ -75,15 +81,15 @@ Remote Android pushes go through FCM. You can either pass the client Firebase fi
 Call `initialize` with values from `google-services.json` (not a service account):
 
 ```ts
-initialize({
-  projectId: '...',       // project_id
-  applicationId: '...',   // mobilesdk_app_id
-  apiKey: '...',          // current_key
-  gcmSenderId: '...',     // project_number
+await initialize({
+  project_id: '...',
+  mobilesdk_app_id: '...',
+  current_key: '...',
+  project_number: '...',
 });
 ```
 
-All four fields are required for Firebase to start. If any is missing, `initialize` does nothing and does not throw. iOS ignores this call.
+All four fields are required for Firebase to start. If any is missing, `initialize` resolves and does nothing. iOS ignores the config and still resolves the promise.
 
 Keep the Firebase service account on your server. Do not put it in the app.
 
@@ -100,7 +106,7 @@ apply plugin: "com.google.gms.google-services"
 
 3. Add the plugin classpath in `android/build.gradle` / `settings.gradle` as in the [Firebase Android setup](https://firebase.google.com/docs/android/setup).
 
-Without `initialize(...)` or that file, `getCredentials()` throws. Notification permission (`POST_NOTIFICATIONS`) is requested on API 33+.
+Without `initialize(...)` or that file, `getCredentials()` throws.
 
 If the host app already declares its own `FirebaseMessagingService`, only one service can handle `com.google.firebase.MESSAGING_EVENT`. Prefer this library’s service or forward events into it.
 
@@ -112,7 +118,7 @@ If the host app already declares its own `FirebaseMessagingService`, only one se
 
 ## Web
 
-Permission helpers resolve to `denied`. `getCredentials()` throws. Listeners are no-ops.
+`initialize()` resolves. `getCredentials()` throws. Listeners are no-ops.
 
 ## Contributing
 

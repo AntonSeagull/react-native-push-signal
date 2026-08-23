@@ -1,7 +1,6 @@
 import { NitroModules } from 'react-native-nitro-modules';
 import type {
   AndroidFirebaseConfig,
-  PermissionStatus,
   PushCredentials,
   PushMessage,
   PushSignal,
@@ -30,16 +29,8 @@ function bindNativeCallbacks() {
   });
 }
 
-export function initialize(config: AndroidFirebaseConfig = {}): void {
-  PushSignalHybridObject.initialize(config);
-}
-
-export function getPermissionStatus(): Promise<PermissionStatus> {
-  return PushSignalHybridObject.getPermissionStatus();
-}
-
-export function requestPermission(): Promise<PermissionStatus> {
-  return PushSignalHybridObject.requestPermission();
+export function initialize(config: AndroidFirebaseConfig = {}): Promise<void> {
+  return PushSignalHybridObject.initialize(config);
 }
 
 export function getCredentials(): Promise<PushCredentials> {

@@ -1,7 +1,7 @@
 import type { HybridObject } from 'react-native-nitro-modules';
 
-export type PermissionStatus = 'authorized' | 'denied' | 'notDetermined';
-export type PushPlatform = 'ios' | 'android';
+/** JS/C++ name cannot be `android`: NDK defines `-DANDROID` and breaks the generated enum. */
+export type PushPlatform = 'ios' | 'android_os';
 export type PushEnvironment = 'sandbox' | 'production';
 
 export interface PushCredentials {
@@ -18,19 +18,17 @@ export interface PushMessage {
 }
 
 export interface AndroidFirebaseConfig {
-  projectId?: string;
-  applicationId?: string;
-  apiKey?: string;
-  gcmSenderId?: string;
+  project_id?: string;
+  mobilesdk_app_id?: string;
+  current_key?: string;
+  project_number?: string;
 }
 
 export interface PushSignal extends HybridObject<{
   ios: 'swift';
   android: 'kotlin';
 }> {
-  initialize(config: AndroidFirebaseConfig): void;
-  getPermissionStatus(): Promise<PermissionStatus>;
-  requestPermission(): Promise<PermissionStatus>;
+  initialize(config: AndroidFirebaseConfig): Promise<void>;
   getCredentials(): Promise<PushCredentials>;
   setOnMessage(callback: (message: PushMessage) => void): void;
   setOnNotificationPress(callback: (message: PushMessage) => void): void;

@@ -1,9 +1,7 @@
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 const mockHybrid = {
-  initialize: jest.fn(),
-  getPermissionStatus: jest.fn(async () => 'denied' as const),
-  requestPermission: jest.fn(async () => 'authorized' as const),
+  initialize: jest.fn(async () => undefined),
   getCredentials: jest.fn(async () => ({
     platform: 'ios' as const,
     token: 'token-1',
@@ -25,20 +23,20 @@ describe('pushSignal', () => {
     jest.resetModules();
   });
 
-  it('forwards permission and credential calls to the hybrid object', async () => {
-    const {
-      getCredentials,
-      getPermissionStatus,
-      initialize,
-      requestPermission,
-    } =
+  it('forwards initialize and credential calls to the hybrid object', async () => {
+    const { getCredentials, initialize } =
       require('../pushSignal.native') as typeof import('../pushSignal.native');
 
-    initialize({ projectId: 'demo' });
-    expect(mockHybrid.initialize).toHaveBeenCalledWith({ projectId: 'demo' });
+    const config = {
+      project_id: 'my-project',
+      mobilesdk_app_id: '1:123456789:android:abcd',
+      current_key: 'AIza...',
+      project_number: '123456789',
+    };
 
-    await expect(getPermissionStatus()).resolves.toBe('denied');
-    await expect(requestPermission()).resolves.toBe('authorized');
+    await initialize(config);
+    expect(mockHybrid.initialize).toHaveBeenCalledWith(config);
+
     await expect(getCredentials()).resolves.toEqual({
       platform: 'ios',
       token: 'token-1',
