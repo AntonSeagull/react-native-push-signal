@@ -307,7 +307,7 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     forwardingDelegate.userNotificationCenter?(
       center,
       willPresent: notification,
-      withCompletionHandler: { forwarded in
+      withCompletionHandler: { (forwarded: UNNotificationPresentationOptions) in
         completionHandler(ourOptions.union(forwarded))
       }
     )
