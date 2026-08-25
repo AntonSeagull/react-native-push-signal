@@ -550,45 +550,20 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
 - (void)pushSignal_application:(UIApplication *)application
     didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
   [[PushSignalCenter shared] handleDeviceToken:deviceToken];
-  [self pushSignal_forwardDeviceToken:application deviceToken:deviceToken];
+  // After swizzle, this selector holds the original AppDelegate implementation (if any).
+  SEL original = @selector(pushSignal_application:didRegisterForRemoteNotificationsWithDeviceToken:);
+  if ([self respondsToSelector:original]) {
+    [self pushSignal_application:application didRegisterForRemoteNotificationsWithDeviceToken:deviceToken];
+  }
 }
 
 - (void)pushSignal_application:(UIApplication *)application
     didFailToRegisterForRemoteNotificationsWithError:(NSError *)error {
   [[PushSignalCenter shared] handleRegistrationError:error];
-  [self pushSignal_forwardError:application error:error];
-}
-
-- (void)pushSignal_forwardDeviceToken:(UIApplication *)application deviceToken:(NSData *)deviceToken {
-  SEL hooked = @selector(application:didRegisterForRemoteNotificationsWithDeviceToken:);
-  SEL original = @selector(pushSignal_application:didRegisterForRemoteNotificationsWithDeviceToken:);
-  if (![self respondsToSelector:original]) {
-    return;
-  }
-  Class cls = object_getClass(self);
-  IMP originalImp = class_getMethodImplementation(cls, original);
-  IMP hookedImp = class_getMethodImplementation(cls, hooked);
-  if (originalImp == NULL || originalImp == hookedImp) {
-    return;
-  }
-  void (*fn)(id, SEL, UIApplication *, NSData *) = (void (*)(id, SEL, UIApplication *, NSData *))originalImp;
-  fn(self, original, application, deviceToken);
-}
-
-- (void)pushSignal_forwardError:(UIApplication *)application error:(NSError *)error {
-  SEL hooked = @selector(application:didFailToRegisterForRemoteNotificationsWithError:);
   SEL original = @selector(pushSignal_application:didFailToRegisterForRemoteNotificationsWithError:);
-  if (![self respondsToSelector:original]) {
-    return;
+  if ([self respondsToSelector:original]) {
+    [self pushSignal_application:application didFailToRegisterForRemoteNotificationsWithError:error];
   }
-  Class cls = object_getClass(self);
-  IMP originalImp = class_getMethodImplementation(cls, original);
-  IMP hookedImp = class_getMethodImplementation(cls, hooked);
-  if (originalImp == NULL || originalImp == hookedImp) {
-    return;
-  }
-  void (*fn)(id, SEL, UIApplication *, NSError *) = (void (*)(id, SEL, UIApplication *, NSError *))originalImp;
-  fn(self, original, application, error);
 }
 
 @end
