@@ -1,5 +1,6 @@
 export type {
   AndroidFirebaseConfig,
+  OnMessageListener,
   PushCredentials,
   PushEnvironment,
   PushMessage,

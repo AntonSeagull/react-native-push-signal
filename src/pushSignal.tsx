@@ -1,5 +1,6 @@
 import type {
   AndroidFirebaseConfig,
+  OnMessageListener,
   PushCredentials,
   PushMessage,
 } from './PushSignal.nitro';
@@ -12,9 +13,7 @@ export async function getCredentials(): Promise<PushCredentials> {
   throw new Error('Push credentials are not supported on web');
 }
 
-export function onMessage(
-  _listener: (message: PushMessage) => void
-): () => void {
+export function onMessage(_listener: OnMessageListener): () => void {
   return () => {};
 }
 

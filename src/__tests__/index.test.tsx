@@ -44,24 +44,24 @@ describe('pushSignal', () => {
     });
   });
 
-  it('fans out native callbacks and unsubscribes listeners', () => {
+  it('fans out native callbacks and unsubscribes listeners', async () => {
     const { onMessage, onNotificationPress } =
       require('../pushSignal.native') as typeof import('../pushSignal.native');
 
-    const message = jest.fn();
+    const message = jest.fn(() => undefined);
     const press = jest.fn();
     const unsubscribeMessage = onMessage(message);
     const unsubscribePress = onNotificationPress(press);
 
     const onMessageCb = mockHybrid.setOnMessage.mock.calls[0]?.[0] as (
       value: unknown
-    ) => void;
+    ) => Promise<boolean>;
     const onPressCb = mockHybrid.setOnNotificationPress.mock.calls[0]?.[0] as (
       value: unknown
     ) => void;
 
     const payload = { title: 'Hi', data: { a: '1' } };
-    onMessageCb(payload);
+    await expect(onMessageCb(payload)).resolves.toBe(false);
     onPressCb(payload);
 
     expect(message).toHaveBeenCalledWith(payload);
@@ -69,10 +69,39 @@ describe('pushSignal', () => {
 
     unsubscribeMessage();
     unsubscribePress();
-    onMessageCb(payload);
+    await expect(onMessageCb(payload)).resolves.toBe(false);
     onPressCb(payload);
 
     expect(message).toHaveBeenCalledTimes(1);
     expect(press).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a foreground banner when any onMessage listener returns true', async () => {
+    const { onMessage } =
+      require('../pushSignal.native') as typeof import('../pushSignal.native');
+
+    onMessage(() => undefined);
+    onMessage(() => true);
+
+    const onMessageCb = mockHybrid.setOnMessage.mock.calls[0]?.[0] as (
+      value: unknown
+    ) => Promise<boolean>;
+
+    await expect(onMessageCb({ title: 'Hi', data: {} })).resolves.toBe(true);
+  });
+
+  it('does not show a banner when onMessage throws or returns nothing', async () => {
+    const { onMessage } =
+      require('../pushSignal.native') as typeof import('../pushSignal.native');
+
+    onMessage(() => {
+      throw new Error('nope');
+    });
+
+    const onMessageCb = mockHybrid.setOnMessage.mock.calls[0]?.[0] as (
+      value: unknown
+    ) => Promise<boolean>;
+
+    await expect(onMessageCb({ title: 'Hi', data: {} })).resolves.toBe(false);
   });
 });

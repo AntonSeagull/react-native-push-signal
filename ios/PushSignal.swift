@@ -19,7 +19,7 @@ class PushSignal: HybridPushSignalSpec {
     }
   }
 
-  func setOnMessage(callback: @escaping (PushMessage) -> Void) throws {
+  func setOnMessage(callback: @escaping (PushMessage) -> Promise<Promise<Bool>>) throws {
     PushSignalCenter.shared.onMessage = callback
   }
 

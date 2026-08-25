@@ -1,6 +1,7 @@
 import { NitroModules } from 'react-native-nitro-modules';
 import type {
   AndroidFirebaseConfig,
+  OnMessageListener,
   PushCredentials,
   PushMessage,
   PushSignal,
@@ -9,7 +10,7 @@ import type {
 const PushSignalHybridObject =
   NitroModules.createHybridObject<PushSignal>('PushSignal');
 
-const messageListeners = new Set<(message: PushMessage) => void>();
+const messageListeners = new Set<OnMessageListener>();
 const pressListeners = new Set<(message: PushMessage) => void>();
 let nativeCallbacksBound = false;
 
@@ -20,8 +21,18 @@ function bindNativeCallbacks() {
 
   nativeCallbacksBound = true;
 
-  PushSignalHybridObject.setOnMessage((message) => {
-    messageListeners.forEach((listener) => listener(message));
+  PushSignalHybridObject.setOnMessage(async (message) => {
+    const results = await Promise.all(
+      [...messageListeners].map(async (listener) => {
+        try {
+          return await listener(message);
+        } catch {
+          return false;
+        }
+      })
+    );
+
+    return results.some((result) => result === true);
   });
 
   PushSignalHybridObject.setOnNotificationPress((message) => {
@@ -37,9 +48,7 @@ export function getCredentials(): Promise<PushCredentials> {
   return PushSignalHybridObject.getCredentials();
 }
 
-export function onMessage(
-  listener: (message: PushMessage) => void
-): () => void {
+export function onMessage(listener: OnMessageListener): () => void {
   bindNativeCallbacks();
   messageListeners.add(listener);
   return () => {

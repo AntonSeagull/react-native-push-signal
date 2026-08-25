@@ -1,4 +1,5 @@
 import Foundation
+import NitroModules
 import ObjectiveC
 import UIKit
 import UserNotifications
@@ -21,7 +22,7 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
   private var pendingLaunchOptions: [AnyHashable: Any]?
   private var didCaptureLaunchNotification = false
 
-  var onMessage: ((PushMessage) -> Void)?
+  var onMessage: ((PushMessage) -> Promise<Promise<Bool>>)?
   var onNotificationPress: ((PushMessage) -> Void)? {
     didSet {
       flushPendingPress()
@@ -74,8 +75,11 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    emitMessage(Self.message(from: notification))
-    completionHandler([])
+    let message = Self.message(from: notification)
+    Task {
+      let shouldShow = await self.shouldShowForegroundBanner(for: message)
+      completionHandler(shouldShow ? Self.foregroundPresentationOptions : [])
+    }
   }
 
   func userNotificationCenter(
@@ -152,10 +156,36 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     waiters.forEach { $0(result) }
   }
 
-  private func emitMessage(_ message: PushMessage) {
-    DispatchQueue.main.async {
-      self.onMessage?(message)
+  private func shouldShowForegroundBanner(for message: PushMessage) async -> Bool {
+    guard let callback = onMessage else {
+      return false
     }
+
+    return await withTaskGroup(of: Bool.self) { group in
+      group.addTask {
+        do {
+          let inner = try await callback(message).await()
+          return try await inner.await()
+        } catch {
+          return false
+        }
+      }
+      group.addTask {
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        return false
+      }
+
+      let first = await group.next() ?? false
+      group.cancelAll()
+      return first
+    }
+  }
+
+  private static var foregroundPresentationOptions: UNNotificationPresentationOptions {
+    if #available(iOS 14.0, *) {
+      return [.banner, .list, .sound, .badge]
+    }
+    return [.alert, .sound, .badge]
   }
 
   private func emitPress(_ message: PushMessage) {

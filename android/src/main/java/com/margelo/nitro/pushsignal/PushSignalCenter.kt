@@ -2,26 +2,39 @@ package com.margelo.nitro.pushsignal
 
 import android.app.Activity
 import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
+import androidx.core.app.NotificationCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.android.gms.tasks.Tasks
 import com.google.firebase.messaging.RemoteMessage
+import com.margelo.nitro.core.Promise
 import java.util.Collections
+import java.util.UUID
 import java.util.WeakHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 
 internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private const val EXTRA_HANDLED = "pushsignal.handled"
+  private const val CHANNEL_ID = "push_signal_default"
+  private const val FOREGROUND_TIMEOUT_MS = 2_000L
 
   private val lock = Any()
+  private val mainHandler = Handler(Looper.getMainLooper())
   @Volatile private var application: Application? = null
   @Volatile private var currentActivity: Activity? = null
-  @Volatile private var onMessage: ((PushMessage) -> Unit)? = null
+  @Volatile private var onMessage: ((PushMessage) -> Promise<Promise<Boolean>>)? = null
   @Volatile private var onNotificationPress: ((PushMessage) -> Unit)? = null
   @Volatile private var pendingPress: PushMessage? = null
   private val registeredActivities = Collections.newSetFromMap(WeakHashMap<Activity, Boolean>())
@@ -63,7 +76,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     onDone(applyFirebaseConfig(context, config))
   }
 
-  fun setOnMessage(callback: (PushMessage) -> Unit) {
+  fun setOnMessage(callback: (PushMessage) -> Promise<Promise<Boolean>>) {
     onMessage = callback
   }
 
@@ -112,12 +125,117 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     return token
   }
 
-  fun emitMessage(message: PushMessage) {
-    onMessage?.invoke(message)
+  fun emitMessage(remoteMessage: RemoteMessage) {
+    val message = remoteMessage.toPushMessage()
+    val inForeground = currentActivity != null
+    resolveShouldShowBanner(message) { shouldShow ->
+      if (
+        shouldShow &&
+        inForeground &&
+        (!message.title.isNullOrEmpty() || !message.body.isNullOrEmpty())
+      ) {
+        postForegroundNotification(message)
+      }
+    }
   }
 
-  fun emitMessage(remoteMessage: RemoteMessage) {
-    emitMessage(remoteMessage.toPushMessage())
+  private fun resolveShouldShowBanner(
+    message: PushMessage,
+    onDone: (Boolean) -> Unit
+  ) {
+    val callback = onMessage
+    if (callback == null) {
+      onDone(false)
+      return
+    }
+
+    val delivered = AtomicBoolean(false)
+    val timeout = Runnable {
+      if (delivered.compareAndSet(false, true)) {
+        onDone(false)
+      }
+    }
+    mainHandler.postDelayed(timeout, FOREGROUND_TIMEOUT_MS)
+
+    val finish = { shouldShow: Boolean ->
+      if (delivered.compareAndSet(false, true)) {
+        mainHandler.removeCallbacks(timeout)
+        onDone(shouldShow)
+      }
+    }
+
+    try {
+      callback(message)
+        .then { inner ->
+          inner
+            .then { shouldShow -> finish(shouldShow) }
+            .catch { finish(false) }
+        }
+        .catch { finish(false) }
+    } catch (_: Throwable) {
+      finish(false)
+    }
+  }
+
+  private fun postForegroundNotification(message: PushMessage) {
+    val context = application ?: return
+    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+      ?: return
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      val existing = manager.getNotificationChannel(CHANNEL_ID)
+      if (existing == null) {
+        manager.createNotificationChannel(
+          NotificationChannel(
+            CHANNEL_ID,
+            "Notifications",
+            NotificationManager.IMPORTANCE_HIGH
+          )
+        )
+      }
+    }
+
+    val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+      ?: return
+    launchIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    launchIntent.putExtra("google.message_id", message.id ?: UUID.randomUUID().toString())
+    message.title?.let { launchIntent.putExtra("gcm.notification.title", it) }
+    message.body?.let { launchIntent.putExtra("gcm.notification.body", it) }
+    message.data.forEach { (key, value) ->
+      launchIntent.putExtra(key, value)
+    }
+
+    val requestCode = (message.id ?: message.title ?: "push").hashCode()
+    val pendingIntent = PendingIntent.getActivity(
+      context,
+      requestCode,
+      launchIntent,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+      .setSmallIcon(smallIcon(context))
+      .setContentTitle(message.title.orEmpty())
+      .setContentText(message.body.orEmpty())
+      .setContentIntent(pendingIntent)
+      .setAutoCancel(true)
+      .setPriority(NotificationCompat.PRIORITY_HIGH)
+      .setDefaults(NotificationCompat.DEFAULT_SOUND)
+      .setNumber(1)
+
+    manager.notify(requestCode, builder.build())
+  }
+
+  private fun smallIcon(context: Context): Int {
+    val named = context.resources.getIdentifier("ic_notification", "drawable", context.packageName)
+    if (named != 0) {
+      return named
+    }
+    val appIcon = context.applicationInfo.icon
+    if (appIcon != 0) {
+      return appIcon
+    }
+    return android.R.drawable.stat_notify_more
   }
 
   override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
