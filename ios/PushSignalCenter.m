@@ -1,6 +1,6 @@
 #import "PushSignalCenter.h"
 #import "PushSignalLaunchStore.h"
-#import <ObjectiveC/runtime.h>
+#import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 
 @interface PushSignalAppDelegateHook : NSObject
