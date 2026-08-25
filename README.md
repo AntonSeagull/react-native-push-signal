@@ -44,10 +44,6 @@ const credentials = await getCredentials();
 
 const stopMessages = onMessage((message) => {
   console.log('incoming', message);
-  if (message.data.silent === '1') {
-    return;
-  }
-  return true;
 });
 
 const stopPress = onNotificationPress((message) => {
@@ -118,14 +114,12 @@ If the host app already declares its own `FirebaseMessagingService`, only one se
 
 | App state | iOS | Android (notification payload) | Android (data-only) |
 | --- | --- | --- | --- |
-| Foreground | `onMessage`. Banner if a listener returns `true` | `onMessage`. Banner if a listener returns `true` | `onMessage`. Tray only if a listener returns `true` and the payload has title or body |
+| Foreground | `onMessage` + system banner | `onMessage` + tray (if title/body) | `onMessage` + tray (if title/body) |
 | Background / killed | System banner. Tap → `onNotificationPress` | System banner. Tap → `onNotificationPress` | No banner. `onMessage` if the process is alive |
 
-- `onMessage` — the push arrived while the app is in the foreground (and Android data messages while the process is alive). Return `true` to show the system banner as usual. No return, `false`, or a throw means no banner. If several listeners are registered, the banner shows when any of them returns `true`.
+- `onMessage` — the push arrived while the app is in the foreground (and Android data messages while the process is alive). Listeners only receive the payload; they do not control the banner.
 - `onNotificationPress` — the user opened the notification, including a cold start.
 - On iOS, a visible push received in the background or when the app is killed is delivered on tap, not through `onMessage`. That is an OS limit.
-
-If `onMessage` throws or takes longer than about 2 seconds, the library does not show a banner.
 
 ## Web
 

@@ -21,19 +21,14 @@ function bindNativeCallbacks() {
 
   nativeCallbacksBound = true;
 
-  PushSignalHybridObject.setOnMessage(async (message) => {
-    const listeners = [...messageListeners];
-    const results = await Promise.all(
-      listeners.map(async (listener) => {
-        try {
-          return await listener(message);
-        } catch {
-          return false;
-        }
-      })
-    );
-
-    return results.some((result) => result === true);
+  PushSignalHybridObject.setOnMessage((message) => {
+    for (const listener of [...messageListeners]) {
+      try {
+        void listener(message);
+      } catch {
+        // Ignore listener failures so one bad subscriber cannot break delivery.
+      }
+    }
   });
 
   PushSignalHybridObject.setOnNotificationPress((message) => {

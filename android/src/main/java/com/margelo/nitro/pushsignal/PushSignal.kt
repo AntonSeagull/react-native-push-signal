@@ -28,7 +28,7 @@ class PushSignal : HybridPushSignalSpec() {
     }
   }
 
-  override fun setOnMessage(callback: (message: PushMessage) -> Promise<Promise<Boolean>>) {
+  override fun setOnMessage(callback: (message: PushMessage) -> Unit) {
     PushSignalCenter.setOnMessage(callback)
   }
 

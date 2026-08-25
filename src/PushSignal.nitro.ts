@@ -19,7 +19,7 @@ export interface PushMessage {
 
 export type OnMessageListener = (
   message: PushMessage
-) => boolean | void | Promise<boolean | void>;
+) => void | Promise<void>;
 
 export interface AndroidFirebaseConfig {
   project_id?: string;
@@ -34,6 +34,6 @@ export interface PushSignal extends HybridObject<{
 }> {
   initialize(config: AndroidFirebaseConfig): Promise<void>;
   getCredentials(): Promise<PushCredentials>;
-  setOnMessage(callback: (message: PushMessage) => Promise<boolean>): void;
+  setOnMessage(callback: (message: PushMessage) => void): void;
   setOnNotificationPress(callback: (message: PushMessage) => void): void;
 }

@@ -27,7 +27,6 @@ export default function App() {
   useEffect(() => {
     const unsubscribeMessage = onMessage((message: PushMessage) => {
       append(`message: ${JSON.stringify(message)}`);
-      return true;
     });
     const unsubscribePress = onNotificationPress((message: PushMessage) => {
       append(`press: ${JSON.stringify(message)}`);

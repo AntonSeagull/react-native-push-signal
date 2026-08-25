@@ -44,10 +44,6 @@ const credentials = await getCredentials();
 
 const stopMessages = onMessage((message) => {
   console.log('incoming', message);
-  if (message.data.silent === '1') {
-    return;
-  }
-  return true;
 });
 
 const stopPress = onNotificationPress((message) => {
@@ -118,14 +114,12 @@ apply plugin: "com.google.gms.google-services"
 
 | Состояние | iOS | Android (notification payload) | Android (data-only) |
 | --- | --- | --- | --- |
-| Foreground | `onMessage`. Баннер, если слушатель вернул `true` | `onMessage`. Баннер, если слушатель вернул `true` | `onMessage`. Tray только если слушатель вернул `true` и в payload есть title или body |
+| Foreground | `onMessage` + системный баннер | `onMessage` + tray (если есть title/body) | `onMessage` + tray (если есть title/body) |
 | Background / killed | Системный баннер. Тап → `onNotificationPress` | Системный баннер. Тап → `onNotificationPress` | Баннера нет. `onMessage`, если процесс жив |
 
-- `onMessage` — пуш пришёл, пока приложение на переднем плане (и Android data-message, пока процесс жив). Верните `true`, чтобы показать системный баннер как обычно. Без return, `false` или ошибка — баннера нет. Если слушателей несколько, баннер показывается, когда любой вернул `true`.
+- `onMessage` — пуш пришёл, пока приложение на переднем плане (и Android data-message, пока процесс жив). Слушатель только получает payload и не управляет баннером.
 - `onNotificationPress` — пользователь открыл уведомление, в том числе при холодном старте.
 - На iOS видимый пуш в фоне или при убитом приложении приходит только в тап, не в `onMessage`. Это ограничение ОС.
-
-Если `onMessage` бросил ошибку или не ответил примерно за 2 секунды, баннер не показывается.
 
 ## Web
 

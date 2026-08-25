@@ -22,6 +22,7 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
 
   private let lock = NSLock()
   private var didInstall = false
+  private var didSwizzleAppDelegate = false
   private var didSwizzleNotificationCenter = false
   private var deviceToken: String?
   private var registrationError: Error?
@@ -33,7 +34,7 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
   private var recentMessageIds: [String: Date] = [:]
   private weak var forwardingDelegate: UNUserNotificationCenterDelegate?
 
-  var onMessage: ((PushMessage) -> Promise<Promise<Bool>>)? {
+  var onMessage: ((PushMessage) -> Void)? {
     didSet {
       flushPendingMessages()
     }
@@ -91,7 +92,7 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
   }
 
   func handleDeviceToken(_ deviceToken: Data) {
-    let token = deviceToken.map { String(format: "%02.2hhx", $0) }.joined()
+    let token = deviceToken.map { String(format: "%02x", $0) }.joined()
     finishRegistration(result: .success(token))
   }
 
@@ -104,19 +105,13 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    let message = Self.message(from: notification)
-    Task {
-      let shouldShow = await self.deliverMessage(message)
-      let ours: UNNotificationPresentationOptions = shouldShow ? Self.foregroundPresentationOptions : []
-      await MainActor.run {
-        self.forwardWillPresent(
-          center,
-          notification: notification,
-          ourOptions: ours,
-          completionHandler: completionHandler
-        )
-      }
-    }
+    deliverMessage(Self.message(from: notification))
+    forwardWillPresent(
+      center,
+      notification: notification,
+      ourOptions: Self.foregroundPresentationOptions,
+      completionHandler: completionHandler
+    )
   }
 
   @objc func userNotificationCenter(
@@ -205,55 +200,26 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     return body()
   }
 
-  private func deliverMessage(_ message: PushMessage) async -> Bool {
+  private func deliverMessage(_ message: PushMessage) {
     guard shouldEmit(message) else {
-      return false
+      return
     }
 
     let callback = synchronized { onMessage }
-
     guard let callback else {
       synchronized { pendingMessages.append(message) }
-      // Still show the system banner so a visible push is not swallowed
-      // before JS has subscribed.
-      return true
+      return
     }
 
-    return await invokeOnMessage(callback, message: message)
+    emitToJs(callback, message: message)
   }
 
-  private func invokeOnMessage(
-    _ callback: @escaping (PushMessage) -> Promise<Promise<Bool>>,
+  private func emitToJs(
+    _ callback: @escaping (PushMessage) -> Void,
     message: PushMessage
-  ) async -> Bool {
-    await withCheckedContinuation { continuation in
-      let resumeLock = NSLock()
-      var resumed = false
-      let finish: (Bool) -> Void = { value in
-        resumeLock.lock()
-        defer { resumeLock.unlock() }
-        guard !resumed else {
-          return
-        }
-        resumed = true
-        continuation.resume(returning: value)
-      }
-
-      DispatchQueue.main.async {
-        Task {
-          do {
-            let inner = try await callback(message).await()
-            let shouldShow = try await inner.await()
-            finish(shouldShow)
-          } catch {
-            finish(true)
-          }
-        }
-      }
-
-      DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-        finish(true)
-      }
+  ) {
+    DispatchQueue.main.async {
+      callback(message)
     }
   }
 
@@ -270,9 +236,7 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
       }
 
       for message in queued {
-        Task {
-          _ = await self.invokeOnMessage(callback, message: message)
-        }
+        self.emitToJs(callback, message: message)
       }
     }
   }
@@ -476,9 +440,13 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
   }
 
   private func swizzleAppDelegate() {
+    guard !didSwizzleAppDelegate else {
+      return
+    }
     guard let appDelegate = UIApplication.shared.delegate else {
       return
     }
+    didSwizzleAppDelegate = true
 
     let target: AnyClass = type(of: appDelegate)
     let source: AnyClass = PushSignalAppDelegateHook.self
@@ -523,8 +491,18 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
 
     let replacementImp = method_getImplementation(replacementMethod)
     let types = method_getTypeEncoding(replacementMethod)
+    let superMethod = class_getSuperclass(target).flatMap { class_getInstanceMethod($0, original) }
 
+    // No implementation on this class yet — install ours and keep superclass under `replacement`.
     if class_addMethod(target, original, replacementImp, types) {
+      if let superMethod {
+        class_addMethod(
+          target,
+          replacement,
+          method_getImplementation(superMethod),
+          method_getTypeEncoding(superMethod)
+        )
+      }
       return
     }
 
@@ -545,17 +523,16 @@ private final class PushSignalAppDelegateHook: NSObject {
     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
   ) {
     PushSignalCenter.shared.handleDeviceToken(deviceToken)
-    let selector = #selector(
-      PushSignalAppDelegateHook.pushSignal_application(_:didRegisterForRemoteNotificationsWithDeviceToken:)
+    forwardToOriginal(
+      hooked: #selector(
+        UIApplicationDelegate.application(_:didRegisterForRemoteNotificationsWithDeviceToken:)
+      ),
+      original: #selector(
+        PushSignalAppDelegateHook.pushSignal_application(_:didRegisterForRemoteNotificationsWithDeviceToken:)
+      ),
+      application: application,
+      deviceToken: deviceToken
     )
-    guard responds(to: selector),
-          let method = class_getInstanceMethod(type(of: self), selector)
-    else {
-      return
-    }
-
-    typealias Fn = @convention(c) (Any, Selector, UIApplication, Data) -> Void
-    unsafeBitCast(method_getImplementation(method), to: Fn.self)(self, selector, application, deviceToken)
   }
 
   @objc func pushSignal_application(
@@ -563,17 +540,54 @@ private final class PushSignalAppDelegateHook: NSObject {
     didFailToRegisterForRemoteNotificationsWithError error: Error
   ) {
     PushSignalCenter.shared.handleRegistrationError(error)
-    let selector = #selector(
-      PushSignalAppDelegateHook.pushSignal_application(_:didFailToRegisterForRemoteNotificationsWithError:)
+    forwardToOriginal(
+      hooked: #selector(
+        UIApplicationDelegate.application(_:didFailToRegisterForRemoteNotificationsWithError:)
+      ),
+      original: #selector(
+        PushSignalAppDelegateHook.pushSignal_application(_:didFailToRegisterForRemoteNotificationsWithError:)
+      ),
+      application: application,
+      error: error as NSError
     )
-    guard responds(to: selector),
-          let method = class_getInstanceMethod(type(of: self), selector)
+  }
+
+  private func forwardToOriginal(
+    hooked: Selector,
+    original: Selector,
+    application: UIApplication,
+    deviceToken: Data
+  ) {
+    guard responds(to: original),
+          let cls = object_getClass(self),
+          let originalImp = class_getMethodImplementation(cls, original),
+          let hookedImp = class_getMethodImplementation(cls, hooked),
+          originalImp != hookedImp
+    else {
+      return
+    }
+
+    typealias Fn = @convention(c) (Any, Selector, UIApplication, Data) -> Void
+    unsafeBitCast(originalImp, to: Fn.self)(self, original, application, deviceToken)
+  }
+
+  private func forwardToOriginal(
+    hooked: Selector,
+    original: Selector,
+    application: UIApplication,
+    error: NSError
+  ) {
+    guard responds(to: original),
+          let cls = object_getClass(self),
+          let originalImp = class_getMethodImplementation(cls, original),
+          let hookedImp = class_getMethodImplementation(cls, hooked),
+          originalImp != hookedImp
     else {
       return
     }
 
     typealias Fn = @convention(c) (Any, Selector, UIApplication, NSError) -> Void
-    unsafeBitCast(method_getImplementation(method), to: Fn.self)(self, selector, application, error as NSError)
+    unsafeBitCast(originalImp, to: Fn.self)(self, original, application, error)
   }
 }
 

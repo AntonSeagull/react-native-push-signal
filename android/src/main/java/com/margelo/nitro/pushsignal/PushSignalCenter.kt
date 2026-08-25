@@ -18,23 +18,20 @@ import com.google.firebase.FirebaseOptions
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.android.gms.tasks.Tasks
 import com.google.firebase.messaging.RemoteMessage
-import com.margelo.nitro.core.Promise
 import java.util.Collections
 import java.util.UUID
 import java.util.WeakHashMap
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicBoolean
 
 internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private const val EXTRA_HANDLED = "pushsignal.handled"
   private const val CHANNEL_ID = "push_signal_default"
-  private const val FOREGROUND_TIMEOUT_MS = 2_000L
 
   private val lock = Any()
   private val mainHandler = Handler(Looper.getMainLooper())
   @Volatile private var application: Application? = null
   @Volatile private var currentActivity: Activity? = null
-  @Volatile private var onMessage: ((PushMessage) -> Promise<Promise<Boolean>>)? = null
+  @Volatile private var onMessage: ((PushMessage) -> Unit)? = null
   @Volatile private var onNotificationPress: ((PushMessage) -> Unit)? = null
   @Volatile private var pendingPress: PushMessage? = null
   private val pendingMessages = CopyOnWriteArrayList<PushMessage>()
@@ -78,23 +75,12 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     onDone(applyFirebaseConfig(context, config))
   }
 
-  fun setOnMessage(callback: (PushMessage) -> Promise<Promise<Boolean>>) {
+  fun setOnMessage(callback: (PushMessage) -> Unit) {
     onMessage = callback
     val queued = pendingMessages.toList()
     pendingMessages.clear()
     queued.forEach { message ->
-      runOnMain {
-        val inForeground = startedActivityCount > 0 || currentActivity != null
-        resolveShouldShowBanner(message) { shouldShow ->
-          if (
-            shouldShow &&
-            inForeground &&
-            (!message.title.isNullOrEmpty() || !message.body.isNullOrEmpty())
-          ) {
-            postForegroundNotification(message)
-          }
-        }
-      }
+      runOnMain { deliverMessage(message) }
     }
   }
 
@@ -145,23 +131,29 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   fun emitMessage(remoteMessage: RemoteMessage) {
     val message = remoteMessage.toPushMessage()
-    runOnMain {
-      val callback = onMessage
-      if (callback == null) {
-        pendingMessages.add(message)
-        return@runOnMain
-      }
+    runOnMain { deliverMessage(message) }
+  }
 
-      val inForeground = startedActivityCount > 0 || currentActivity != null
-      resolveShouldShowBanner(message) { shouldShow ->
-        if (
-          shouldShow &&
-          inForeground &&
-          (!message.title.isNullOrEmpty() || !message.body.isNullOrEmpty())
-        ) {
-          postForegroundNotification(message)
-        }
-      }
+  private fun deliverMessage(message: PushMessage) {
+    val callback = onMessage
+    if (callback == null) {
+      pendingMessages.add(message)
+      return
+    }
+
+    try {
+      // Fire-and-forget: JS only needs the payload.
+      callback(message)
+    } catch (_: Throwable) {
+      // Ignore listener failures.
+    }
+
+    val inForeground = startedActivityCount > 0 || currentActivity != null
+    if (
+      inForeground &&
+      (!message.title.isNullOrEmpty() || !message.body.isNullOrEmpty())
+    ) {
+      postForegroundNotification(message)
     }
   }
 
@@ -170,44 +162,6 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       block()
     } else {
       mainHandler.post(block)
-    }
-  }
-
-  private fun resolveShouldShowBanner(
-    message: PushMessage,
-    onDone: (Boolean) -> Unit
-  ) {
-    val callback = onMessage
-    if (callback == null) {
-      onDone(false)
-      return
-    }
-
-    val delivered = AtomicBoolean(false)
-    val timeout = Runnable {
-      if (delivered.compareAndSet(false, true)) {
-        onDone(true)
-      }
-    }
-    mainHandler.postDelayed(timeout, FOREGROUND_TIMEOUT_MS)
-
-    val finish = { shouldShow: Boolean ->
-      if (delivered.compareAndSet(false, true)) {
-        mainHandler.removeCallbacks(timeout)
-        onDone(shouldShow)
-      }
-    }
-
-    try {
-      callback(message)
-        .then { inner ->
-          inner
-            .then { shouldShow -> finish(shouldShow) }
-            .catch { finish(true) }
-        }
-        .catch { finish(true) }
-    } catch (_: Throwable) {
-      finish(true)
     }
   }
 
