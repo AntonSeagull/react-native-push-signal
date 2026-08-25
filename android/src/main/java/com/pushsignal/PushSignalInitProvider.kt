@@ -1,4 +1,4 @@
-package com.margelo.nitro.pushsignal
+package com.pushsignal
 
 import android.content.ContentProvider
 import android.content.ContentValues

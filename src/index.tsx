@@ -5,7 +5,7 @@ export type {
   PushEnvironment,
   PushMessage,
   PushPlatform,
-} from './PushSignal.nitro';
+} from './types';
 export {
   getCredentials,
   initialize,

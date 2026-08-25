@@ -1,4 +1,4 @@
-package com.margelo.nitro.pushsignal
+package com.pushsignal
 
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage

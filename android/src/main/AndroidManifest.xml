@@ -3,12 +3,12 @@
 
   <application>
     <provider
-      android:name="com.margelo.nitro.pushsignal.PushSignalInitProvider"
+      android:name="com.pushsignal.PushSignalInitProvider"
       android:authorities="${applicationId}.pushsignal.init"
       android:exported="false" />
 
     <service
-      android:name="com.margelo.nitro.pushsignal.PushSignalMessagingService"
+      android:name="com.pushsignal.PushSignalMessagingService"
       android:exported="false">
       <intent-filter>
         <action android:name="com.google.firebase.MESSAGING_EVENT" />

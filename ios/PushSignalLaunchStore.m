@@ -1,11 +1,6 @@
 #import "PushSignalLaunchStore.h"
+#import "PushSignalCenter.h"
 #import <UIKit/UIKit.h>
-
-// Swift `@objc(PushSignalCenter)` — declared so messaging via `id` type-checks.
-@interface PushSignalCenter : NSObject
-+ (void)installEarly;
-+ (void)bootstrapWithLaunchOptions:(nullable NSDictionary *)launchOptions;
-@end
 
 static NSDictionary *sLaunchOptions;
 
@@ -23,10 +18,7 @@ NSDictionary *PushSignalCopyLaunchOptions(void) {
                   object:nil
                    queue:nil
               usingBlock:^(NSNotification *notification) {
-                id center = NSClassFromString(@"PushSignalCenter");
-                if ([center respondsToSelector:@selector(installEarly)]) {
-                  [center installEarly];
-                }
+                [PushSignalCenter installEarly];
               }];
 
   [[NSNotificationCenter defaultCenter]
@@ -35,10 +27,7 @@ NSDictionary *PushSignalCopyLaunchOptions(void) {
                    queue:nil
               usingBlock:^(NSNotification *notification) {
                 sLaunchOptions = [notification.userInfo copy];
-                id center = NSClassFromString(@"PushSignalCenter");
-                if ([center respondsToSelector:@selector(bootstrapWithLaunchOptions:)]) {
-                  [center bootstrapWithLaunchOptions:sLaunchOptions];
-                }
+                [PushSignalCenter bootstrapWithLaunchOptions:sLaunchOptions];
               }];
 }
 

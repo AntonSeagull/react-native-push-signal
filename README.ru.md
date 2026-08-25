@@ -7,10 +7,8 @@
 ## Установка
 
 ```sh
-npm install react-native-push-signal react-native-nitro-modules
+npm install react-native-push-signal
 ```
-
-`react-native-nitro-modules` обязателен: библиотека собрана на [Nitro Modules](https://nitro.margelo.com/).
 
 ## Использование
 

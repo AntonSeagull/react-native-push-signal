@@ -1,4 +1,4 @@
-package com.margelo.nitro.pushsignal
+package com.pushsignal
 
 import android.app.Activity
 import android.app.Application
@@ -13,10 +13,10 @@ import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.core.app.NotificationCompat
+import com.google.android.gms.tasks.Tasks
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
 import com.google.firebase.messaging.FirebaseMessaging
-import com.google.android.gms.tasks.Tasks
 import com.google.firebase.messaging.RemoteMessage
 import java.util.Collections
 import java.util.UUID
@@ -142,7 +142,6 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     }
 
     try {
-      // Fire-and-forget: JS only needs the payload.
       callback(message)
     } catch (_: Throwable) {
       // Ignore listener failures.

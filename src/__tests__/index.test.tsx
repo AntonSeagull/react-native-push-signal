@@ -1,29 +1,47 @@
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
-const mockHybrid = {
+type MessageHandler = (message: {
+  id?: string;
+  title?: string;
+  body?: string;
+  data: Object;
+}) => void;
+
+const messageHandlers: MessageHandler[] = [];
+const pressHandlers: MessageHandler[] = [];
+
+const mockNative = {
   initialize: jest.fn(async () => undefined),
   getCredentials: jest.fn(async () => ({
-    platform: 'ios' as const,
+    platform: 'ios',
     token: 'token-1',
-    environment: 'sandbox' as const,
+    environment: 'sandbox',
   })),
-  setOnMessage: jest.fn(),
-  setOnNotificationPress: jest.fn(),
+  startListening: jest.fn(),
+  onMessage: jest.fn((handler: MessageHandler) => {
+    messageHandlers.push(handler);
+    return { remove: () => undefined };
+  }),
+  onNotificationPress: jest.fn((handler: MessageHandler) => {
+    pressHandlers.push(handler);
+    return { remove: () => undefined };
+  }),
 };
 
-jest.mock('react-native-nitro-modules', () => ({
-  NitroModules: {
-    createHybridObject: () => mockHybrid,
-  },
+jest.mock('../NativePushSignal', () => ({
+  __esModule: true,
+  default: mockNative,
 }));
 
 describe('pushSignal', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     jest.resetModules();
+    messageHandlers.length = 0;
+    pressHandlers.length = 0;
   });
 
-  it('forwards initialize and credential calls to the hybrid object', async () => {
+  it('forwards initialize and credential calls to the native module', async () => {
     const { getCredentials, initialize } =
       require('../pushSignal.native') as typeof import('../pushSignal.native');
 
@@ -35,7 +53,7 @@ describe('pushSignal', () => {
     };
 
     await initialize(config);
-    expect(mockHybrid.initialize).toHaveBeenCalledWith(config);
+    expect(mockNative.initialize).toHaveBeenCalledWith(config);
 
     await expect(getCredentials()).resolves.toEqual({
       platform: 'ios',
@@ -53,24 +71,17 @@ describe('pushSignal', () => {
     const unsubscribeMessage = onMessage(message);
     const unsubscribePress = onNotificationPress(press);
 
-    const onMessageCb = mockHybrid.setOnMessage.mock.calls[0]?.[0] as (
-      value: unknown
-    ) => void;
-    const onPressCb = mockHybrid.setOnNotificationPress.mock.calls[0]?.[0] as (
-      value: unknown
-    ) => void;
-
     const payload = { title: 'Hi', data: { a: '1' } };
-    onMessageCb(payload);
-    onPressCb(payload);
+    messageHandlers[0]?.(payload);
+    pressHandlers[0]?.(payload);
 
     expect(message).toHaveBeenCalledWith(payload);
     expect(press).toHaveBeenCalledWith(payload);
 
     unsubscribeMessage();
     unsubscribePress();
-    onMessageCb(payload);
-    onPressCb(payload);
+    messageHandlers[0]?.(payload);
+    pressHandlers[0]?.(payload);
 
     expect(message).toHaveBeenCalledTimes(1);
     expect(press).toHaveBeenCalledTimes(1);
@@ -86,11 +97,12 @@ describe('pushSignal', () => {
     });
     onMessage(ok);
 
-    const onMessageCb = mockHybrid.setOnMessage.mock.calls[0]?.[0] as (
-      value: unknown
-    ) => void;
-
-    expect(() => onMessageCb({ title: 'Hi', data: {} })).not.toThrow();
+    expect(() => messageHandlers[0]?.({ title: 'Hi', data: {} })).not.toThrow();
     expect(ok).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls startListening when binding native callbacks', () => {
+    require('../pushSignal.native');
+    expect(mockNative.startListening).toHaveBeenCalled();
   });
 });

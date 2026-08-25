@@ -3,7 +3,7 @@ import type {
   OnMessageListener,
   PushCredentials,
   PushMessage,
-} from './PushSignal.nitro';
+} from './types';
 
 export async function initialize(
   _config: AndroidFirebaseConfig = {}

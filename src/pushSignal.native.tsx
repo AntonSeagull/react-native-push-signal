@@ -1,18 +1,54 @@
-import { NitroModules } from 'react-native-nitro-modules';
+import NativePushSignal from './NativePushSignal';
 import type {
   AndroidFirebaseConfig,
   OnMessageListener,
   PushCredentials,
+  PushEnvironment,
   PushMessage,
-  PushSignal,
-} from './PushSignal.nitro';
-
-const PushSignalHybridObject =
-  NitroModules.createHybridObject<PushSignal>('PushSignal');
+  PushPlatform,
+} from './types';
 
 const messageListeners = new Set<OnMessageListener>();
 const pressListeners = new Set<(message: PushMessage) => void>();
 let nativeCallbacksBound = false;
+
+function normalizeMessage(raw: {
+  id?: string;
+  title?: string;
+  body?: string;
+  data: Object;
+}): PushMessage {
+  const data: Record<string, string> = {};
+  if (raw.data && typeof raw.data === 'object') {
+    for (const [key, value] of Object.entries(
+      raw.data as Record<string, unknown>
+    )) {
+      if (value == null) {
+        continue;
+      }
+      data[key] = typeof value === 'string' ? value : String(value);
+    }
+  }
+
+  return {
+    id: raw.id,
+    title: raw.title,
+    body: raw.body,
+    data,
+  };
+}
+
+function normalizeCredentials(raw: {
+  platform: string;
+  token: string;
+  environment?: string;
+}): PushCredentials {
+  return {
+    platform: raw.platform as PushPlatform,
+    token: raw.token,
+    environment: raw.environment as PushEnvironment | undefined,
+  };
+}
 
 function bindNativeCallbacks() {
   if (nativeCallbacksBound) {
@@ -21,27 +57,34 @@ function bindNativeCallbacks() {
 
   nativeCallbacksBound = true;
 
-  PushSignalHybridObject.setOnMessage((message) => {
+  NativePushSignal.onMessage((raw) => {
+    const message = normalizeMessage(raw);
     for (const listener of [...messageListeners]) {
       try {
-        void listener(message);
+        Promise.resolve(listener(message)).then(
+          () => undefined,
+          () => undefined
+        );
       } catch {
         // Ignore listener failures so one bad subscriber cannot break delivery.
       }
     }
   });
 
-  PushSignalHybridObject.setOnNotificationPress((message) => {
+  NativePushSignal.onNotificationPress((raw) => {
+    const message = normalizeMessage(raw);
     pressListeners.forEach((listener) => listener(message));
   });
+
+  NativePushSignal.startListening();
 }
 
 export function initialize(config: AndroidFirebaseConfig = {}): Promise<void> {
-  return PushSignalHybridObject.initialize(config);
+  return NativePushSignal.initialize(config);
 }
 
 export function getCredentials(): Promise<PushCredentials> {
-  return PushSignalHybridObject.getCredentials();
+  return NativePushSignal.getCredentials().then(normalizeCredentials);
 }
 
 export function onMessage(listener: OnMessageListener): () => void {

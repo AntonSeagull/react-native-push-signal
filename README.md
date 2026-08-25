@@ -7,10 +7,8 @@ Get device credentials for your server and listen for incoming notifications or 
 ## Installation
 
 ```sh
-npm install react-native-push-signal react-native-nitro-modules
+npm install react-native-push-signal
 ```
-
-`react-native-nitro-modules` is required because this library uses [Nitro Modules](https://nitro.margelo.com/).
 
 ## Usage
 
