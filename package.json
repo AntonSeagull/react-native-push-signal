@@ -1,7 +1,7 @@
 {
   "name": "react-native-push-signal",
   "version": "0.1.8",
-  "description": "Push",
+  "description": "React Native push notifications with direct APNs and FCM integration — get device tokens for your server and listen for incoming messages and taps",
   "main": "./lib/module/index.js",
   "types": "./lib/typescript/src/index.d.ts",
   "exports": {
@@ -45,18 +45,28 @@
   "keywords": [
     "react-native",
     "ios",
-    "android"
+    "android",
+    "push",
+    "push-notifications",
+    "notifications",
+    "apns",
+    "fcm",
+    "firebase",
+    "firebase-cloud-messaging",
+    "device-token",
+    "push-token",
+    "remote-notifications"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://antonseagull.com.git"
+    "url": "git+https://github.com/AntonSeagull/react-native-push-signal.git"
   },
   "author": "AntonSeagull <hi@antonseagull.com> (https://antonseagull.com)",
   "license": "MIT",
   "bugs": {
-    "url": "https://antonseagull.com/issues"
+    "url": "https://github.com/AntonSeagull/react-native-push-signal/issues"
   },
-  "homepage": "https://antonseagull.com#readme",
+  "homepage": "https://github.com/AntonSeagull/react-native-push-signal#readme",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
