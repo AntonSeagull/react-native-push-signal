@@ -74,7 +74,7 @@ const stopPress = onNotificationPress((message) => {
 2. Включите **Background Modes → Remote notifications**.
 3. Проверяйте на физическом устройстве. Симулятор не умеет регистрироваться в APNs.
 
-Библиотека сама подписывается на `UNUserNotificationCenter` и колбеки APNs-токена. В `AppDelegate` хоста ничего дописывать не нужно.
+Библиотека сама ставит делегат `UNUserNotificationCenter` на запуске (до JS) и подписывается на колбеки APNs-токена. В `AppDelegate` хоста ничего дописывать не нужно. Без делегата до конца запуска iOS не вызывает `willPresent`, и пуш в foreground не доходит до JS.
 
 ## Настройка Android
 

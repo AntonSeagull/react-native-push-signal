@@ -1,0 +1,4 @@
+-keep class com.margelo.nitro.pushsignal.PushSignalMessagingService { *; }
+-keep class com.margelo.nitro.pushsignal.PushSignalInitProvider { *; }
+-keep class com.margelo.nitro.pushsignal.PushSignalCenter { *; }
+-keep class com.google.firebase.messaging.** { *; }

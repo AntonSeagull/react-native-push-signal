@@ -74,7 +74,7 @@ Keep Apple `.p8` keys and the Firebase service account on the server. The app ne
 2. Enable **Background Modes → Remote notifications**.
 3. Use a physical device. The simulator cannot register with APNs.
 
-The library hooks `UNUserNotificationCenter` and APNs token callbacks, so the host `AppDelegate` does not need extra code.
+The library hooks `UNUserNotificationCenter` at launch (before JS starts) and APNs token callbacks, so the host `AppDelegate` does not need extra code. Foreground pushes only reach JS if this delegate is installed before launch finishes.
 
 ## Android setup
 

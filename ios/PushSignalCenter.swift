@@ -13,16 +13,31 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     shared.install()
   }
 
+  /// Called from ObjC `+load` / launch notifications so the UNUserNotificationCenter
+  /// delegate is set before the app finishes launching. If this happens after JS loads,
+  /// iOS never calls `willPresent` and foreground pushes never reach JS.
+  @objc static func installEarly() {
+    shared.install()
+  }
+
   private let lock = NSLock()
   private var didInstall = false
+  private var didSwizzleNotificationCenter = false
   private var deviceToken: String?
   private var registrationError: Error?
   private var tokenWaiters: [(Result<String, Error>) -> Void] = []
   private var pendingPress: PushMessage?
+  private var pendingMessages: [PushMessage] = []
   private var pendingLaunchOptions: [AnyHashable: Any]?
   private var didCaptureLaunchNotification = false
+  private var recentMessageIds: [String: Date] = [:]
+  private weak var forwardingDelegate: UNUserNotificationCenterDelegate?
 
-  var onMessage: ((PushMessage) -> Promise<Promise<Bool>>)?
+  var onMessage: ((PushMessage) -> Promise<Promise<Bool>>)? {
+    didSet {
+      flushPendingMessages()
+    }
+  }
   var onNotificationPress: ((PushMessage) -> Void)? {
     didSet {
       flushPendingPress()
@@ -30,13 +45,21 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
   }
 
   func install() {
-    DispatchQueue.main.async {
-      self.installOnMain()
+    if Thread.isMainThread {
+      installOnMain()
+    } else {
+      DispatchQueue.main.async {
+        self.installOnMain()
+      }
     }
   }
 
   private func installOnMain() {
+    swizzleNotificationCenterDelegateIfNeeded()
+
     guard !didInstall else {
+      UNUserNotificationCenter.current().delegate = self
+      swizzleAppDelegate()
       captureLaunchNotificationIfNeeded()
       return
     }
@@ -45,6 +68,12 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     UNUserNotificationCenter.current().delegate = self
     swizzleAppDelegate()
     captureLaunchNotificationIfNeeded()
+  }
+
+  func rememberForwardingDelegate(_ delegate: UNUserNotificationCenterDelegate?) {
+    if let delegate, delegate !== self {
+      forwardingDelegate = delegate
+    }
   }
 
   func fetchCredentials() async throws -> PushCredentials {
@@ -70,25 +99,39 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     finishRegistration(result: .failure(error))
   }
 
-  func userNotificationCenter(
+  @objc func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
     let message = Self.message(from: notification)
     Task {
-      let shouldShow = await self.shouldShowForegroundBanner(for: message)
-      completionHandler(shouldShow ? Self.foregroundPresentationOptions : [])
+      let shouldShow = await self.deliverMessage(message)
+      let ours: UNNotificationPresentationOptions = shouldShow ? Self.foregroundPresentationOptions : []
+      await MainActor.run {
+        self.forwardWillPresent(
+          center,
+          notification: notification,
+          ourOptions: ours,
+          completionHandler: completionHandler
+        )
+      }
     }
   }
 
-  func userNotificationCenter(
+  @objc func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
     emitPress(Self.message(from: response.notification))
-    completionHandler()
+    if forwardingDelegate?.responds(
+      to: #selector(UNUserNotificationCenterDelegate.userNotificationCenter(_:didReceive:withCompletionHandler:))
+    ) == true {
+      forwardingDelegate?.userNotificationCenter?(center, didReceive: response, withCompletionHandler: completionHandler)
+    } else {
+      completionHandler()
+    }
   }
 
   private func waitForToken() async throws -> String {
@@ -156,29 +199,118 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     waiters.forEach { $0(result) }
   }
 
-  private func shouldShowForegroundBanner(for message: PushMessage) async -> Bool {
-    guard let callback = onMessage else {
+  private func synchronized<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
+
+  private func deliverMessage(_ message: PushMessage) async -> Bool {
+    guard shouldEmit(message) else {
       return false
     }
 
-    return await withTaskGroup(of: Bool.self) { group in
-      group.addTask {
-        do {
-          let inner = try await callback(message).await()
-          return try await inner.await()
-        } catch {
-          return false
+    let callback = synchronized { onMessage }
+
+    guard let callback else {
+      synchronized { pendingMessages.append(message) }
+      // Still show the system banner so a visible push is not swallowed
+      // before JS has subscribed.
+      return true
+    }
+
+    return await invokeOnMessage(callback, message: message)
+  }
+
+  private func invokeOnMessage(
+    _ callback: @escaping (PushMessage) -> Promise<Promise<Bool>>,
+    message: PushMessage
+  ) async -> Bool {
+    await withCheckedContinuation { continuation in
+      let resumeLock = NSLock()
+      var resumed = false
+      let finish: (Bool) -> Void = { value in
+        resumeLock.lock()
+        defer { resumeLock.unlock() }
+        guard !resumed else {
+          return
         }
-      }
-      group.addTask {
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        return false
+        resumed = true
+        continuation.resume(returning: value)
       }
 
-      let first = await group.next() ?? false
-      group.cancelAll()
-      return first
+      DispatchQueue.main.async {
+        Task {
+          do {
+            let inner = try await callback(message).await()
+            let shouldShow = try await inner.await()
+            finish(shouldShow)
+          } catch {
+            finish(true)
+          }
+        }
+      }
+
+      DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        finish(true)
+      }
     }
+  }
+
+  private func flushPendingMessages() {
+    DispatchQueue.main.async {
+      let callback = self.synchronized { self.onMessage }
+      let queued = self.synchronized { () -> [PushMessage] in
+        let messages = self.pendingMessages
+        self.pendingMessages.removeAll()
+        return messages
+      }
+      guard let callback, !queued.isEmpty else {
+        return
+      }
+
+      for message in queued {
+        Task {
+          _ = await self.invokeOnMessage(callback, message: message)
+        }
+      }
+    }
+  }
+
+  private func shouldEmit(_ message: PushMessage) -> Bool {
+    let key = message.id ?? "\(message.title ?? "")|\(message.body ?? "")"
+    return synchronized {
+      let now = Date()
+      recentMessageIds = recentMessageIds.filter { now.timeIntervalSince($0.value) < 5 }
+      if let last = recentMessageIds[key], now.timeIntervalSince(last) < 2 {
+        return false
+      }
+      recentMessageIds[key] = now
+      return true
+    }
+  }
+
+  private func forwardWillPresent(
+    _ center: UNUserNotificationCenter,
+    notification: UNNotification,
+    ourOptions: UNNotificationPresentationOptions,
+    completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    let selector = #selector(
+      UNUserNotificationCenterDelegate.userNotificationCenter(_:willPresent:withCompletionHandler:)
+    )
+    guard let forwardingDelegate, forwardingDelegate.responds(to: selector) else {
+      completionHandler(ourOptions)
+      return
+    }
+
+    forwardingDelegate.userNotificationCenter?(
+      center,
+      willPresent: notification,
+      withCompletionHandler: { forwarded in
+        completionHandler(ourOptions.union(forwarded))
+      }
+    )
   }
 
   private static var foregroundPresentationOptions: UNNotificationPresentationOptions {
@@ -363,6 +495,25 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     )
   }
 
+  private func swizzleNotificationCenterDelegateIfNeeded() {
+    guard !didSwizzleNotificationCenter else {
+      return
+    }
+    didSwizzleNotificationCenter = true
+
+    let target: AnyClass = UNUserNotificationCenter.self
+    let original = #selector(setter: UNUserNotificationCenter.delegate)
+    let replacement = #selector(UNUserNotificationCenter.pushSignal_setDelegate(_:))
+
+    guard let originalMethod = class_getInstanceMethod(target, original),
+          let replacementMethod = class_getInstanceMethod(target, replacement)
+    else {
+      return
+    }
+
+    method_exchangeImplementations(originalMethod, replacementMethod)
+  }
+
   private func swizzle(target: AnyClass, original: Selector, replacement: Selector, source: AnyClass) {
     guard let replacementMethod = class_getInstanceMethod(source, replacement) else {
       return
@@ -421,5 +572,17 @@ private final class PushSignalAppDelegateHook: NSObject {
 
     typealias Fn = @convention(c) (Any, Selector, UIApplication, NSError) -> Void
     unsafeBitCast(method_getImplementation(method), to: Fn.self)(self, selector, application, error as NSError)
+  }
+}
+
+extension UNUserNotificationCenter {
+  @objc func pushSignal_setDelegate(_ delegate: UNUserNotificationCenterDelegate?) {
+    if let delegate, delegate is PushSignalCenter {
+      pushSignal_setDelegate(delegate)
+      return
+    }
+
+    PushSignalCenter.shared.rememberForwardingDelegate(delegate)
+    pushSignal_setDelegate(PushSignalCenter.shared)
   }
 }

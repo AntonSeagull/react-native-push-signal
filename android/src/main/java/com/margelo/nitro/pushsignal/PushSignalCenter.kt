@@ -37,7 +37,9 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   @Volatile private var onMessage: ((PushMessage) -> Promise<Promise<Boolean>>)? = null
   @Volatile private var onNotificationPress: ((PushMessage) -> Unit)? = null
   @Volatile private var pendingPress: PushMessage? = null
+  private val pendingMessages = CopyOnWriteArrayList<PushMessage>()
   private val registeredActivities = Collections.newSetFromMap(WeakHashMap<Activity, Boolean>())
+  @Volatile private var startedActivityCount = 0
   @Volatile private var pendingFirebaseConfig: AndroidFirebaseConfig? = null
   private val initializeWaiters = CopyOnWriteArrayList<(Exception?) -> Unit>()
 
@@ -78,6 +80,22 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   fun setOnMessage(callback: (PushMessage) -> Promise<Promise<Boolean>>) {
     onMessage = callback
+    val queued = pendingMessages.toList()
+    pendingMessages.clear()
+    queued.forEach { message ->
+      runOnMain {
+        val inForeground = startedActivityCount > 0 || currentActivity != null
+        resolveShouldShowBanner(message) { shouldShow ->
+          if (
+            shouldShow &&
+            inForeground &&
+            (!message.title.isNullOrEmpty() || !message.body.isNullOrEmpty())
+          ) {
+            postForegroundNotification(message)
+          }
+        }
+      }
+    }
   }
 
   fun setOnNotificationPress(callback: (PushMessage) -> Unit) {
@@ -127,15 +145,31 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   fun emitMessage(remoteMessage: RemoteMessage) {
     val message = remoteMessage.toPushMessage()
-    val inForeground = currentActivity != null
-    resolveShouldShowBanner(message) { shouldShow ->
-      if (
-        shouldShow &&
-        inForeground &&
-        (!message.title.isNullOrEmpty() || !message.body.isNullOrEmpty())
-      ) {
-        postForegroundNotification(message)
+    runOnMain {
+      val callback = onMessage
+      if (callback == null) {
+        pendingMessages.add(message)
+        return@runOnMain
       }
+
+      val inForeground = startedActivityCount > 0 || currentActivity != null
+      resolveShouldShowBanner(message) { shouldShow ->
+        if (
+          shouldShow &&
+          inForeground &&
+          (!message.title.isNullOrEmpty() || !message.body.isNullOrEmpty())
+        ) {
+          postForegroundNotification(message)
+        }
+      }
+    }
+  }
+
+  private fun runOnMain(block: () -> Unit) {
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      block()
+    } else {
+      mainHandler.post(block)
     }
   }
 
@@ -152,7 +186,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     val delivered = AtomicBoolean(false)
     val timeout = Runnable {
       if (delivered.compareAndSet(false, true)) {
-        onDone(false)
+        onDone(true)
       }
     }
     mainHandler.postDelayed(timeout, FOREGROUND_TIMEOUT_MS)
@@ -169,11 +203,11 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
         .then { inner ->
           inner
             .then { shouldShow -> finish(shouldShow) }
-            .catch { finish(false) }
+            .catch { finish(true) }
         }
-        .catch { finish(false) }
+        .catch { finish(true) }
     } catch (_: Throwable) {
-      finish(false)
+      finish(true)
     }
   }
 
@@ -244,7 +278,10 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     handleIntent(activity.intent)
   }
 
-  override fun onActivityStarted(activity: Activity) = Unit
+  override fun onActivityStarted(activity: Activity) {
+    currentActivity = activity
+    startedActivityCount += 1
+  }
 
   override fun onActivityResumed(activity: Activity) {
     currentActivity = activity
@@ -257,7 +294,12 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     }
   }
 
-  override fun onActivityStopped(activity: Activity) = Unit
+  override fun onActivityStopped(activity: Activity) {
+    startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
+    if (currentActivity === activity) {
+      currentActivity = null
+    }
+  }
 
   override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 
@@ -289,6 +331,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   private fun applyFirebaseConfig(context: Context, config: AndroidFirebaseConfig): Exception? {
     if (FirebaseApp.getApps(context).isNotEmpty()) {
+      FirebaseMessaging.getInstance().isAutoInitEnabled = true
       return null
     }
 
@@ -305,6 +348,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
           .setGcmSenderId(config.project_number!!.trim())
           .build()
       FirebaseApp.initializeApp(context, options)
+      FirebaseMessaging.getInstance().isAutoInitEnabled = true
       null
     } catch (error: Exception) {
       error

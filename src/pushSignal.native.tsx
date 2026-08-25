@@ -22,8 +22,9 @@ function bindNativeCallbacks() {
   nativeCallbacksBound = true;
 
   PushSignalHybridObject.setOnMessage(async (message) => {
+    const listeners = [...messageListeners];
     const results = await Promise.all(
-      [...messageListeners].map(async (listener) => {
+      listeners.map(async (listener) => {
         try {
           return await listener(message);
         } catch {
@@ -65,3 +66,5 @@ export function onNotificationPress(
     pressListeners.delete(listener);
   };
 }
+
+bindNativeCallbacks();

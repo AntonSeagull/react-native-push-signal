@@ -9,7 +9,12 @@ class PushSignalMessagingService : FirebaseMessagingService() {
     PushSignalCenter.attach(applicationContext)
   }
 
+  override fun onNewToken(token: String) {
+    PushSignalCenter.attach(applicationContext)
+  }
+
   override fun onMessageReceived(message: RemoteMessage) {
+    PushSignalCenter.attach(applicationContext)
     PushSignalCenter.emitMessage(message)
   }
 }
