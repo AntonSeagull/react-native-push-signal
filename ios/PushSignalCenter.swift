@@ -307,8 +307,10 @@ final class PushSignalCenter: NSObject, UNUserNotificationCenterDelegate {
     forwardingDelegate.userNotificationCenter?(
       center,
       willPresent: notification,
-      withCompletionHandler: { (forwarded: UNNotificationPresentationOptions) in
-        completionHandler(ourOptions.union(forwarded))
+      withCompletionHandler: { (forwarded: Int) in
+        // ObjC optional-protocol bridging exposes options as Int here.
+        let forwardedOptions = UNNotificationPresentationOptions(rawValue: UInt(forwarded))
+        completionHandler(ourOptions.union(forwardedOptions))
       }
     )
   }
