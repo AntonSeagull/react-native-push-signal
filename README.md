@@ -108,6 +108,23 @@ Without `initialize(...)` or that file, `getCredentials()` throws.
 
 If the host app already declares its own `FirebaseMessagingService`, only one service can handle `com.google.firebase.MESSAGING_EVENT`. Prefer this library’s service or forward events into it.
 
+### When it fails on Xiaomi: `SERVICE_NOT_AVAILABLE`
+
+If `getCredentials()` throws `Failed to get an FCM token: SERVICE_NOT_AVAILABLE`, the FCM token could not be obtained. Your server never receives a token, so there is nowhere to send pushes — delivery itself is not the problem.
+
+Before requesting the token the library checks Google Play services and retries a few times with backoff, but some causes can only be fixed on the device:
+
+- **Google account.** The device must be signed into a Google account. FCM does not issue a token without one.
+- **Google Play services.** They must be installed, enabled and up to date. On a China-only ROM without GMS, FCM cannot work at all — you need another push provider.
+- **Network.** Check connectivity and disable VPN and private DNS.
+- **MIUI / HyperOS.** Enable autostart and remove battery restrictions: Settings → Apps → your app → Autostart; Battery → No restrictions. Allow background data for the app.
+
+What to look for in the logs:
+
+```sh
+adb logcat | grep -iE "SERVICE_NOT_AVAILABLE|FirebaseMessaging|PushSignal"
+```
+
 ## Incoming messages vs taps
 
 | App state | iOS | Android (notification payload) | Android (data-only) |

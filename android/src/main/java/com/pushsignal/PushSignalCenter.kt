@@ -11,8 +11,11 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.core.app.NotificationCompat
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.tasks.Tasks
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
@@ -22,10 +25,16 @@ import java.util.Collections
 import java.util.UUID
 import java.util.WeakHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
 
 internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
+  private const val TAG = "PushSignal"
   private const val EXTRA_HANDLED = "pushsignal.handled"
   private const val CHANNEL_ID = "push_signal_default"
+  private const val TOKEN_TIMEOUT_SECONDS = 10L
+  private const val TOKEN_MAX_ATTEMPTS = 5
+  private const val TOKEN_INITIAL_RETRY_DELAY_MS = 1_000L
+  private const val TOKEN_MAX_RETRY_DELAY_MS = 8_000L
 
   private val lock = Any()
   private val mainHandler = Handler(Looper.getMainLooper())
@@ -100,6 +109,8 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     val context = application
       ?: throw IllegalStateException("PushSignal is not initialized")
 
+    ensurePlayServices(context)
+
     try {
       if (FirebaseApp.getApps(context).isEmpty()) {
         FirebaseApp.initializeApp(context)
@@ -112,21 +123,100 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       )
     }
 
-    val task = FirebaseMessaging.getInstance().token
-    val token = try {
-      Tasks.await(task)
-    } catch (error: Exception) {
-      throw IllegalStateException(
-        "Failed to get an FCM token. Call initialize({ project_id, mobilesdk_app_id, current_key, project_number }) or add google-services.json.",
-        error
-      )
-    }
+    val token = awaitTokenWithRetry()
 
     if (token.isNullOrEmpty()) {
       throw IllegalStateException("Firebase returned an empty FCM token")
     }
 
     return token
+  }
+
+  /**
+   * Fails fast with an actionable message when Google Play services cannot serve FCM
+   * (for example a China-only ROM without GMS).
+   */
+  private fun ensurePlayServices(context: Context) {
+    val status = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context)
+    if (status == ConnectionResult.SUCCESS) {
+      return
+    }
+
+    val reason = when (status) {
+      ConnectionResult.SERVICE_MISSING ->
+        "Google Play services are missing on this device, so FCM cannot be used. A ROM without GMS needs another push provider."
+      ConnectionResult.SERVICE_VERSION_UPDATE_REQUIRED ->
+        "Google Play services are outdated. Update them in the Play Store and try again."
+      ConnectionResult.SERVICE_DISABLED ->
+        "Google Play services are disabled. Enable them in the device settings and try again."
+      ConnectionResult.SERVICE_INVALID ->
+        "Google Play services are invalid or corrupted on this device. Reinstalling them usually helps."
+      else ->
+        "Google Play services are unavailable (code $status)."
+    }
+    Log.w(TAG, "Play services check failed: $reason")
+    throw IllegalStateException(reason)
+  }
+
+  /**
+   * FCM returns SERVICE_NOT_AVAILABLE for transient conditions (no Google account yet,
+   * Play services still starting, flaky network). Xiaomi/MIUI devices hit this often,
+   * so retry with backoff before surfacing the failure.
+   */
+  private fun awaitTokenWithRetry(): String? {
+    var delayMs = TOKEN_INITIAL_RETRY_DELAY_MS
+    var lastError: Exception? = null
+
+    for (attempt in 1..TOKEN_MAX_ATTEMPTS) {
+      try {
+        return Tasks.await(
+          FirebaseMessaging.getInstance().token,
+          TOKEN_TIMEOUT_SECONDS,
+          TimeUnit.SECONDS
+        )
+      } catch (error: Exception) {
+        lastError = error
+        if (attempt == TOKEN_MAX_ATTEMPTS || !isRetryableTokenError(error)) {
+          break
+        }
+        Log.w(TAG, "FCM token attempt $attempt/$TOKEN_MAX_ATTEMPTS failed: ${error.message}. Retrying in ${delayMs}ms")
+        try {
+          Thread.sleep(delayMs)
+        } catch (_: InterruptedException) {
+          Thread.currentThread().interrupt()
+          break
+        }
+        delayMs = (delayMs * 2).coerceAtMost(TOKEN_MAX_RETRY_DELAY_MS)
+      }
+    }
+
+    val cause = lastError
+    throw IllegalStateException(
+      "Failed to get an FCM token: ${cause?.message ?: "unknown error"}. " +
+        "Make sure the device is signed into a Google account, Google Play services are up to date, " +
+        "and the app is allowed to use background data. " +
+        "Call initialize({ project_id, mobilesdk_app_id, current_key, project_number }) or add google-services.json.",
+      cause
+    )
+  }
+
+  private fun isRetryableTokenError(error: Throwable): Boolean {
+    var current: Throwable? = error
+    while (current != null) {
+      if (current is java.io.IOException || current is java.util.concurrent.TimeoutException) {
+        return true
+      }
+      val message = current.message?.uppercase() ?: ""
+      if (
+        message.contains("SERVICE_NOT_AVAILABLE") ||
+        message.contains("TIMEOUT") ||
+        message.contains("INTERNAL_SERVER_ERROR")
+      ) {
+        return true
+      }
+      current = current.cause
+    }
+    return false
   }
 
   fun emitMessage(remoteMessage: RemoteMessage) {
