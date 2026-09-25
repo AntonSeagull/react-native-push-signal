@@ -9,7 +9,6 @@ export type NativePushMessage = {
 };
 
 export type NativePushCredentials = {
-  platform: string;
   token: string;
   environment?: string;
 };

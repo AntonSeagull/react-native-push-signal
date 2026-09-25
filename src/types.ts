@@ -3,7 +3,6 @@ export type PushPlatform = 'ios' | 'android_os';
 export type PushEnvironment = 'sandbox' | 'production';
 
 export interface PushCredentials {
-  platform: PushPlatform;
   token: string;
   environment?: PushEnvironment;
 }

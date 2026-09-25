@@ -38,7 +38,7 @@ if (status !== RESULTS.GRANTED) {
 }
 
 const credentials = await getCredentials();
-// POST credentials to your server: { platform, token, environment? }
+// POST credentials to your server: { token, environment? }
 
 const stopMessages = onMessage((message) => {
   console.log('incoming', message);

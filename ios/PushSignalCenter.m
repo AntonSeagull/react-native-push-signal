@@ -111,7 +111,6 @@
         return;
       }
       NSMutableDictionary *credentials = [NSMutableDictionary dictionary];
-      credentials[@"platform"] = @"ios";
       credentials[@"token"] = token ?: @"";
       credentials[@"environment"] = [self currentEnvironment];
       resolve(credentials);

@@ -43,12 +43,10 @@ function normalizeMessage(raw: {
 }
 
 function normalizeCredentials(raw: {
-  platform: string;
   token: string;
   environment?: string;
 }): PushCredentials {
   return {
-    platform: raw.platform as PushPlatform,
     token: raw.token,
     environment: raw.environment as PushEnvironment | undefined,
   };

@@ -38,7 +38,6 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
         PushSignalCenter.attach(reactApplicationContext)
         val token = PushSignalCenter.fetchToken()
         val result = Arguments.createMap().apply {
-          putString("platform", "android_os")
           putString("token", token)
         }
         promise.resolve(result)

@@ -13,7 +13,6 @@ const pressHandlers: MessageHandler[] = [];
 const mockNative = {
   initialize: jest.fn(async () => undefined),
   getCredentials: jest.fn(async () => ({
-    platform: 'ios',
     token: 'token-1',
     environment: 'sandbox',
   })),
@@ -68,7 +67,6 @@ describe('pushSignal', () => {
     expect(mockNative.initialize).toHaveBeenCalledWith(config);
 
     await expect(getCredentials()).resolves.toEqual({
-      platform: 'ios',
       token: 'token-1',
       environment: 'sandbox',
     });
