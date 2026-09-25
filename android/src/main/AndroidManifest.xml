@@ -1,6 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+  <!-- Android 11+ package visibility: lets isPackageInstalled() confirm an
+       alternative push provider on the device. -->
+  <queries>
+    <package android:name="com.huawei.hwid" />
+    <package android:name="com.xiaomi.xmsf" />
+  </queries>
+
   <application>
     <provider
       android:name="com.pushsignal.PushSignalInitProvider"

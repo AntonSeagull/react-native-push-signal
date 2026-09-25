@@ -1,5 +1,6 @@
 #import "PushSignal.h"
 #import "PushSignalCenter.h"
+#import <UIKit/UIKit.h>
 
 @implementation PushSignal {
   BOOL _listening;
@@ -20,6 +21,23 @@
                                                  rejecter:^(NSError *error) {
                                                    reject(@"E_CREDENTIALS", error.localizedDescription, error);
                                                  }];
+}
+
+- (void)getDiagnostics:(RCTPromiseResolveBlock)resolve
+                reject:(RCTPromiseRejectBlock)reject {
+  (void)reject;
+  UIDevice *device = [UIDevice currentDevice];
+  resolve(@{
+    @"platform": @"ios",
+    @"gmsAvailable": @YES,
+    @"gmsStatus": @0,
+    @"manufacturer": @"Apple",
+    @"brand": @"Apple",
+    @"model": device.model ?: @"iOS device",
+    @"provider": @"apns",
+    @"providerName": @"Apple Push Notification service (APNs)",
+    @"providerInstalled": @YES,
+  });
 }
 
 - (void)startListening {

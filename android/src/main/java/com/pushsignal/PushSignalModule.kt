@@ -26,7 +26,8 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
       if (error == null) {
         promise.resolve(null)
       } else {
-        promise.reject("E_INIT", error.message, error)
+        val code = (error as? PushSignalException)?.code ?: "E_INIT"
+        promise.reject(code, error.message, error)
       }
     }
   }
@@ -42,7 +43,19 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
         }
         promise.resolve(result)
       } catch (error: Exception) {
-        promise.reject("E_CREDENTIALS", error.message, error)
+        val code = (error as? PushSignalException)?.code ?: "E_CREDENTIALS"
+        promise.reject(code, error.message, error)
+      }
+    }
+  }
+
+  override fun getDiagnostics(promise: Promise) {
+    executor.execute {
+      try {
+        PushSignalCenter.attach(reactApplicationContext)
+        promise.resolve(PushSignalCenter.diagnose(reactApplicationContext).toWritableMap())
+      } catch (error: Exception) {
+        promise.reject("E_DIAGNOSTICS", error.message, error)
       }
     }
   }
@@ -84,5 +97,20 @@ private fun PushMessage.toWritableMap(): WritableMap {
     dataMap.putString(key, value)
   }
   map.putMap("data", dataMap)
+  return map
+}
+
+private fun PushDiagnostics.toWritableMap(): WritableMap {
+  val map = Arguments.createMap()
+  map.putString("platform", platform)
+  map.putBoolean("gmsAvailable", gmsAvailable)
+  map.putInt("gmsStatus", gmsStatus)
+  map.putString("manufacturer", manufacturer)
+  map.putString("brand", brand)
+  map.putString("model", model)
+  map.putString("provider", provider)
+  map.putString("providerName", providerName)
+  providerInstalled?.let { map.putBoolean("providerInstalled", it) }
+  hint?.let { map.putString("hint", it) }
   return map
 }

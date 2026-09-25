@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -35,6 +36,18 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private const val TOKEN_MAX_ATTEMPTS = 5
   private const val TOKEN_INITIAL_RETRY_DELAY_MS = 1_000L
   private const val TOKEN_MAX_RETRY_DELAY_MS = 8_000L
+
+  private const val PROVIDER_FCM = "fcm"
+  private const val PROVIDER_HMS = "hms"
+  private const val PROVIDER_MI_PUSH = "mi_push"
+  private const val PROVIDER_OPPO_PUSH = "oppo_push"
+  private const val PROVIDER_VIVO_PUSH = "vivo_push"
+  private const val PROVIDER_MEIZU_PUSH = "meizu_push"
+  private const val PROVIDER_UNKNOWN = "unknown"
+
+  /** Service apps used to positively confirm an alternative provider on the device. */
+  private const val PACKAGE_HMS = "com.huawei.hwid"
+  private const val PACKAGE_MI_PUSH = "com.xiaomi.xmsf"
 
   private val lock = Any()
   private val mainHandler = Handler(Looper.getMainLooper())
@@ -107,7 +120,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   fun fetchToken(): String {
     val context = application
-      ?: throw IllegalStateException("PushSignal is not initialized")
+      ?: throw PushSignalException("E_NOT_INITIALIZED", "PushSignal is not initialized")
 
     ensurePlayServices(context)
 
@@ -117,16 +130,17 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       }
       FirebaseApp.getInstance()
     } catch (error: IllegalStateException) {
-      throw IllegalStateException(
+      throw PushSignalException(
+        "E_FIREBASE_CONFIG",
         "Firebase is not configured. Call initialize({ project_id, mobilesdk_app_id, current_key, project_number }) or add google-services.json.",
         error
       )
     }
 
-    val token = awaitTokenWithRetry()
+    val token = awaitTokenWithRetry(context)
 
     if (token.isNullOrEmpty()) {
-      throw IllegalStateException("Firebase returned an empty FCM token")
+      throw PushSignalException("E_FCM_TOKEN", "Firebase returned an empty FCM token")
     }
 
     return token
@@ -134,7 +148,8 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   /**
    * Fails fast with an actionable message when Google Play services cannot serve FCM
-   * (for example a China-only ROM without GMS).
+   * (for example a China-only ROM without GMS). The message names the provider the
+   * device should use instead, so the cause is obvious in React Native logs.
    */
   private fun ensurePlayServices(context: Context) {
     val status = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context)
@@ -142,9 +157,17 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       return
     }
 
+    val code = when (status) {
+      ConnectionResult.SERVICE_MISSING -> "E_GMS_MISSING"
+      ConnectionResult.SERVICE_VERSION_UPDATE_REQUIRED -> "E_GMS_UPDATE_REQUIRED"
+      ConnectionResult.SERVICE_DISABLED -> "E_GMS_DISABLED"
+      ConnectionResult.SERVICE_INVALID -> "E_GMS_INVALID"
+      else -> "E_GMS_UNAVAILABLE"
+    }
+
     val reason = when (status) {
       ConnectionResult.SERVICE_MISSING ->
-        "Google Play services are missing on this device, so FCM cannot be used. A ROM without GMS needs another push provider."
+        "Google Play services are missing on this device, so the standard Google push service (FCM) cannot be used."
       ConnectionResult.SERVICE_VERSION_UPDATE_REQUIRED ->
         "Google Play services are outdated. Update them in the Play Store and try again."
       ConnectionResult.SERVICE_DISABLED ->
@@ -152,10 +175,118 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       ConnectionResult.SERVICE_INVALID ->
         "Google Play services are invalid or corrupted on this device. Reinstalling them usually helps."
       else ->
-        "Google Play services are unavailable (code $status)."
+        "Google Play services are unavailable (code $status), so the standard Google push service (FCM) cannot be used."
     }
-    Log.w(TAG, "Play services check failed: $reason")
-    throw IllegalStateException(reason)
+
+    val diagnostics = diagnose(context)
+    val message = listOfNotNull(reason, diagnostics.hint).joinToString(" ")
+    Log.w(TAG, "Play services check failed ($code): $message")
+    throw PushSignalException(code, message)
+  }
+
+  /**
+   * Collects device and provider diagnostics without throwing. Used both by the
+   * `getDiagnostics` API and to enrich errors with a concrete replacement service.
+   */
+  fun diagnose(context: Context): PushDiagnostics {
+    val status = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context)
+    val gmsAvailable = status == ConnectionResult.SUCCESS
+    val provider = resolveProvider(context, gmsAvailable)
+    val hint = providerHint(provider, gmsAvailable)
+
+    return PushDiagnostics(
+      platform = "android_os",
+      gmsAvailable = gmsAvailable,
+      gmsStatus = status,
+      manufacturer = Build.MANUFACTURER ?: "",
+      brand = Build.BRAND ?: "",
+      model = Build.MODEL ?: "",
+      provider = provider.id,
+      providerName = provider.name,
+      providerInstalled = provider.installed,
+      hint = hint,
+    )
+  }
+
+  private data class ProviderInfo(
+    val id: String,
+    val name: String,
+    val installed: Boolean?,
+  )
+
+  /**
+   * Picks the push provider this device should use. Checks the standard Google
+   * service first, then positively confirms an installed alternative, then falls
+   * back to the manufacturer mapping. Class reflection cannot see another
+   * provider's SDK unless the host bundles it, so package checks and the
+   * manufacturer are the reliable signals.
+   */
+  private fun resolveProvider(context: Context, gmsAvailable: Boolean): ProviderInfo {
+    if (gmsAvailable) {
+      return ProviderInfo(PROVIDER_FCM, "Firebase Cloud Messaging (FCM)", true)
+    }
+
+    if (isPackageInstalled(context, PACKAGE_HMS)) {
+      return ProviderInfo(PROVIDER_HMS, "HMS Push Kit (Huawei Push)", true)
+    }
+    if (isPackageInstalled(context, PACKAGE_MI_PUSH)) {
+      return ProviderInfo(PROVIDER_MI_PUSH, "Mi Push (Xiaomi Push)", true)
+    }
+
+    val keys = setOf(Build.MANUFACTURER, Build.BRAND)
+      .filterNotNull()
+      .map { it.uppercase() }
+
+    return when {
+      keys.any { it.contains("HUAWEI") || it.contains("HONOR") } ->
+        ProviderInfo(PROVIDER_HMS, "HMS Push Kit (Huawei Push)", false)
+      keys.any { it.contains("XIAOMI") || it.contains("REDMI") || it.contains("POCO") } ->
+        ProviderInfo(PROVIDER_MI_PUSH, "Mi Push (Xiaomi Push)", false)
+      keys.any { it.contains("OPPO") || it.contains("ONEPLUS") || it.contains("REALME") } ->
+        ProviderInfo(PROVIDER_OPPO_PUSH, "OPPO Push (HeyTap)", false)
+      keys.any { it.contains("VIVO") || it.contains("IQOO") } ->
+        ProviderInfo(PROVIDER_VIVO_PUSH, "vivo Push", false)
+      keys.any { it.contains("MEIZU") } ->
+        ProviderInfo(PROVIDER_MEIZU_PUSH, "Meizu Push", false)
+      else ->
+        ProviderInfo(PROVIDER_UNKNOWN, "unknown", null)
+    }
+  }
+
+  private fun providerHint(provider: ProviderInfo, gmsAvailable: Boolean): String? {
+    if (gmsAvailable) {
+      return null
+    }
+    val device = listOfNotNull(Build.MANUFACTURER, Build.BRAND)
+      .filter { it.isNotBlank() }
+      .distinct()
+      .joinToString("/")
+
+    return when (provider.id) {
+      PROVIDER_HMS ->
+        "This device ($device) has no usable Google Play services, so FCM will not issue a token. Use HMS Push Kit (Huawei Push) instead of the standard Google service."
+      PROVIDER_MI_PUSH ->
+        "This device ($device) has no usable Google Play services, so FCM will not issue a token. Use Mi Push (Xiaomi Push) instead of the standard Google service."
+      PROVIDER_OPPO_PUSH ->
+        "This device ($device) has no usable Google Play services, so FCM will not issue a token. Use OPPO Push (HeyTap) instead of the standard Google service."
+      PROVIDER_VIVO_PUSH ->
+        "This device ($device) has no usable Google Play services, so FCM will not issue a token. Use vivo Push instead of the standard Google service."
+      PROVIDER_MEIZU_PUSH ->
+        "This device ($device) has no usable Google Play services, so FCM will not issue a token. Use Meizu Push instead of the standard Google service."
+      else ->
+        "No usable Google Play services were found and no known push provider was detected on this ROM, so FCM cannot be used. Integrate another push provider (HMS, Mi Push, OPPO/vivo/Meizu Push)."
+    }
+  }
+
+  private fun isPackageInstalled(context: Context, packageName: String): Boolean {
+    return try {
+      context.packageManager.getPackageInfo(packageName, 0)
+      true
+    } catch (_: PackageManager.NameNotFoundException) {
+      false
+    } catch (_: Exception) {
+      false
+    }
   }
 
   /**
@@ -163,7 +294,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
    * Play services still starting, flaky network). Xiaomi/MIUI devices hit this often,
    * so retry with backoff before surfacing the failure.
    */
-  private fun awaitTokenWithRetry(): String? {
+  private fun awaitTokenWithRetry(context: Context): String? {
     var delayMs = TOKEN_INITIAL_RETRY_DELAY_MS
     var lastError: Exception? = null
 
@@ -191,13 +322,16 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     }
 
     val cause = lastError
-    throw IllegalStateException(
-      "Failed to get an FCM token: ${cause?.message ?: "unknown error"}. " +
-        "Make sure the device is signed into a Google account, Google Play services are up to date, " +
-        "and the app is allowed to use background data. " +
-        "Call initialize({ project_id, mobilesdk_app_id, current_key, project_number }) or add google-services.json.",
-      cause
-    )
+    val diagnostics = diagnose(context)
+    val message = listOfNotNull(
+      "Failed to get an FCM token: ${cause?.message ?: "unknown error"}.",
+      "Make sure the device is signed into a Google account, Google Play services are up to date, " +
+        "and the app is allowed to use background data.",
+      "Call initialize({ project_id, mobilesdk_app_id, current_key, project_number }) or add google-services.json.",
+      diagnostics.hint,
+    ).joinToString(" ")
+    Log.w(TAG, "Failed to get an FCM token: $message")
+    throw PushSignalException("E_FCM_TOKEN", message, cause)
   }
 
   private fun isRetryableTokenError(error: Throwable): Boolean {

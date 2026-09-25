@@ -115,7 +115,7 @@ apply plugin: "com.google.gms.google-services"
 Перед запросом токена библиотека проверяет Google Play services и делает несколько попыток с паузами, но часть причин лечится только на устройстве:
 
 - **Google-аккаунт.** На устройстве должен быть выполнен вход в Google-аккаунт. Без него FCM токен не выдаёт.
-- **Google Play services.** Должны быть установлены, включены и обновлены. На китайской прошивке без GMS FCM не заработает в принципе — нужен другой провайдер пушей.
+- **Google Play services.** Должны быть установлены, включены и обновлены. На китайской прошивке без GMS FCM не заработает в принципе — нужен другой провайдер пушей; см. [Определение не‑Google устройства](#определение-неgoogle-устройства-getdiagnostics-и-pushsignalerror).
 - **Сеть.** Проверьте интернет, отключите VPN и приватный DNS.
 - **MIUI / HyperOS.** Включите автозапуск и снимите ограничения батареи: Настройки → Приложения → «ваше приложение» → Автозапуск; Батарея → Без ограничений. Разрешите приложению фоновые данные.
 
@@ -124,6 +124,53 @@ apply plugin: "com.google.gms.google-services"
 ```sh
 adb logcat | grep -iE "SERVICE_NOT_AVAILABLE|FirebaseMessaging|PushSignal"
 ```
+
+### Определение не‑Google устройства: `getDiagnostics()` и `PushSignalError`
+
+Когда Google Play services не могут обслуживать FCM, библиотека это определяет и подсказывает, какой сервис использовать вместо стандартного — в тексте ошибки и в структурированном виде, чтобы причина была видна в логах React Native.
+
+`initialize()` и `getCredentials()` отклоняются с `PushSignalError`:
+
+```ts
+import { getCredentials, PushSignalError } from 'react-native-push-signal';
+
+try {
+  const credentials = await getCredentials();
+} catch (error) {
+  if (error instanceof PushSignalError) {
+    console.warn(error.code); // E_GMS_MISSING, E_FCM_TOKEN, ...
+    console.warn(error.message); // "... Use HMS Push Kit (Huawei Push) instead of the standard Google service."
+    console.warn(error.provider); // 'hms'
+    console.warn(error.hint); // готовая подсказка
+    console.warn(error.diagnostics); // полный снимок устройства и провайдера
+  }
+}
+```
+
+Диагностику можно получить и без запроса токена:
+
+```ts
+import { getDiagnostics } from 'react-native-push-signal';
+
+const diagnostics = await getDiagnostics();
+// { platform, gmsAvailable, gmsStatus, manufacturer, brand, model,
+//   provider, providerName, providerInstalled?, hint? }
+```
+
+Провайдер, который предлагается при недоступных GMS:
+
+| Производитель            | `provider`   | Сервис                             |
+| ------------------------ | ------------ | ---------------------------------- |
+| HUAWEI / HONOR           | `hms`        | HMS Push Kit (Huawei Push)         |
+| Xiaomi / Redmi / POCO    | `mi_push`    | Mi Push (Xiaomi Push)              |
+| OPPO / OnePlus / realme  | `oppo_push`  | OPPO Push (HeyTap)                 |
+| vivo / iQOO              | `vivo_push`  | vivo Push                          |
+| Meizu                    | `meizu_push` | Meizu Push                         |
+| остальные                | `unknown`    | общая подсказка «нужен другой»     |
+
+`providerInstalled` равно `true` только если сервис-приложение провайдера действительно найдено на устройстве (`com.huawei.hwid`, `com.xiaomi.xmsf`), иначе поле отсутствует. iOS всегда сообщает `provider: 'apns'`. Библиотека сама ничего не логирует — передавайте данные туда, куда нужно.
+
+Коды ошибок: `E_GMS_MISSING`, `E_GMS_DISABLED`, `E_GMS_UPDATE_REQUIRED`, `E_GMS_INVALID`, `E_GMS_UNAVAILABLE`, `E_FCM_TOKEN`, `E_FIREBASE_CONFIG`, `E_NOT_INITIALIZED`.
 
 ## Входящее сообщение и тап
 

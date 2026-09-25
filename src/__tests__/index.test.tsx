@@ -17,6 +17,18 @@ const mockNative = {
     token: 'token-1',
     environment: 'sandbox',
   })),
+  getDiagnostics: jest.fn(async () => ({
+    platform: 'android_os',
+    gmsAvailable: false,
+    gmsStatus: 1,
+    manufacturer: 'HUAWEI',
+    brand: 'HUAWEI',
+    model: 'ELS-NX9',
+    provider: 'hms',
+    providerName: 'HMS Push Kit (Huawei Push)',
+    providerInstalled: true,
+    hint: 'Use HMS Push Kit instead.',
+  })),
   startListening: jest.fn(),
   onMessage: jest.fn((handler: MessageHandler) => {
     messageHandlers.push(handler);
@@ -60,6 +72,54 @@ describe('pushSignal', () => {
       token: 'token-1',
       environment: 'sandbox',
     });
+  });
+
+  it('exposes structured diagnostics', async () => {
+    const { getDiagnostics } =
+      require('../pushSignal.native') as typeof import('../pushSignal.native');
+
+    await expect(getDiagnostics()).resolves.toEqual({
+      platform: 'android_os',
+      gmsAvailable: false,
+      gmsStatus: 1,
+      manufacturer: 'HUAWEI',
+      brand: 'HUAWEI',
+      model: 'ELS-NX9',
+      provider: 'hms',
+      providerName: 'HMS Push Kit (Huawei Push)',
+      providerInstalled: true,
+      hint: 'Use HMS Push Kit instead.',
+    });
+  });
+
+  it('turns a native token failure into PushSignalError with provider hint', async () => {
+    const { PushSignalError } = require('../PushSignalError');
+    (mockNative.getCredentials as unknown as jest.Mock).mockRejectedValueOnce(
+      Object.assign(new Error('Google Play services are missing'), {
+        code: 'E_GMS_MISSING',
+      })
+    );
+
+    const { getCredentials } =
+      require('../pushSignal.native') as typeof import('../pushSignal.native');
+
+    let thrown: unknown;
+    try {
+      await getCredentials();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(PushSignalError);
+    expect(thrown).toMatchObject({
+      name: 'PushSignalError',
+      code: 'E_GMS_MISSING',
+      provider: 'hms',
+      hint: 'Use HMS Push Kit instead.',
+    });
+    expect(
+      (thrown as InstanceType<typeof PushSignalError>).diagnostics?.provider
+    ).toBe('hms');
   });
 
   it('fans out native callbacks and unsubscribes listeners', () => {
