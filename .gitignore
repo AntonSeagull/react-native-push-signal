@@ -1,3 +1,6 @@
+# Local agent memory (project-specific, not part of the published package)
+AGENTS.md
+
 # OSX
 #
 .DS_Store

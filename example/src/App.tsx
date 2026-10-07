@@ -55,6 +55,7 @@ export default function App() {
                   mobilesdk_app_id: '1:123456789:android:abcd',
                   current_key: 'AIza...',
                   project_number: '123456789',
+                  devPanel: true,
                 });
                 const next = await getCredentials();
                 setCredentials(next);

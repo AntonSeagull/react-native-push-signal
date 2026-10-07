@@ -89,6 +89,8 @@ await initialize({
 
 All four fields are required for Firebase to start. If any is missing, `initialize` resolves and does nothing. iOS ignores the config and still resolves the promise.
 
+Pass `devPanel: true` to show a native debugging overlay — see [Dev panel (Android)](#dev-panel-android).
+
 Keep the Firebase service account on your server. Do not put it in the app.
 
 ### google-services.json
@@ -172,6 +174,27 @@ Provider suggested when GMS is unavailable:
 
 Error codes: `E_GMS_MISSING`, `E_GMS_DISABLED`, `E_GMS_UPDATE_REQUIRED`, `E_GMS_INVALID`, `E_GMS_UNAVAILABLE`, `E_FCM_TOKEN`, `E_FIREBASE_CONFIG`, `E_NOT_INITIALIZED`.
 
+## Dev panel (Android)
+
+Pass `devPanel: true` to `initialize` to show a native overlay at the bottom of the screen with the notification module's event log:
+
+```ts
+await initialize({
+  project_id: '...',
+  mobilesdk_app_id: '...',
+  current_key: '...',
+  project_number: '...',
+  devPanel: true,
+});
+```
+
+- Collapsed it is a small pill (`PushSignal · N`) with a status dot — green when the last event succeeded, red on an error.
+- Tap the pill to expand a scrollable log; use **Копировать / Очистить / Свернуть** in the header. New events auto-scroll.
+- It records: initialization, FCM token requests and results, incoming pushes (with foreground/background), the foreground notification, taps, duplicate taps, listener binding and errors (with the provider hint).
+- Events are buffered in memory from process start, so a push that arrives before `initialize` — or from the background `FirebaseMessagingService` — is still visible once the panel is enabled. History is not persisted across process restarts.
+
+The panel uses only platform views, adds no dependencies and is a no-op on iOS and web. Intended for development builds.
+
 ## Incoming messages vs taps
 
 | App state | iOS | Android (notification payload) | Android (data-only) |
@@ -182,6 +205,7 @@ Error codes: `E_GMS_MISSING`, `E_GMS_DISABLED`, `E_GMS_UPDATE_REQUIRED`, `E_GMS_
 - `onMessage` — the push arrived while the app is in the foreground (and Android data messages while the process is alive). Listeners only receive the payload; they do not control the banner.
 - `onNotificationPress` — the user opened the notification, including a cold start.
 - On iOS, a visible push received in the background or when the app is killed is delivered on tap, not through `onMessage`. That is an OS limit.
+- On Android duplicate deliveries are collapsed: the same incoming message within 500 ms and the same tap within 2 s are emitted to subscribers once. On a cold start the tap is buffered until the push module is initialized, then delivered with the tapped notification's payload.
 
 ## Web
 

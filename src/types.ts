@@ -49,4 +49,10 @@ export interface AndroidFirebaseConfig {
   mobilesdk_app_id?: string;
   current_key?: string;
   project_number?: string;
+  /**
+   * Shows a native debugging overlay at the bottom of the screen with the
+   * notification module's event log (Android only). Collapsed it is a small
+   * pill; tap it to expand. Intended for development builds.
+   */
+  devPanel?: boolean;
 }

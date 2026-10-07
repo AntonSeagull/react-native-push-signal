@@ -42,7 +42,11 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
       project_number = config.getStringOrNull("project_number"),
     )
 
+    val devPanel = config.hasKey("devPanel") && !config.isNull("devPanel") &&
+      config.getBoolean("devPanel")
+
     PushSignalCenter.attach(reactApplicationContext)
+    PushSignalCenter.setDevPanel(devPanel)
     PushSignalCenter.initialize(firebaseConfig) { error ->
       if (error == null) {
         promise.resolve(null)
@@ -98,6 +102,7 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
 
   override fun invalidate() {
     reactApplicationContext.removeActivityEventListener(activityEventListener)
+    PushSignalCenter.setDevPanel(false)
     super.invalidate()
   }
 

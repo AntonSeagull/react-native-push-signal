@@ -34,6 +34,8 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private const val CHANNEL_ID = "push_signal_default"
   /** Collapses the same tap seen through several Android entry points. */
   private const val PRESS_DEDUPE_MS = 2_000L
+  /** Collapses the same incoming message delivered more than once (FCM is at-least-once). */
+  private const val MESSAGE_DEDUPE_MS = 500L
 
   /** Upper bound for taps buffered before JS subscribes. */
   private const val MAX_PENDING_PRESSES = 20
@@ -60,10 +62,14 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   @Volatile private var currentActivity: Activity? = null
   @Volatile private var onMessage: ((PushMessage) -> Unit)? = null
   @Volatile private var onNotificationPress: ((PushMessage) -> Unit)? = null
+  /** False until the push module (Firebase) is initialized or already present. */
+  @Volatile private var ready = false
   private val pendingPresses = ArrayDeque<PushMessage>()
   private var lastPressKey: String? = null
   private var lastPressAt = 0L
   private val pendingMessages = CopyOnWriteArrayList<PushMessage>()
+  private var lastMessageKey: String? = null
+  private var lastMessageAt = 0L
   private val registeredActivities = Collections.newSetFromMap(WeakHashMap<Activity, Boolean>())
   @Volatile private var startedActivityCount = 0
   @Volatile private var pendingFirebaseConfig: AndroidFirebaseConfig? = null
@@ -78,6 +84,12 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     application = app
     app.registerActivityLifecycleCallbacks(this)
     Log.d(TAG, "[tap] attach: lifecycle callbacks registered on ${app.javaClass.simpleName}")
+    PushSignalDevLog.add(
+      DevLogLevel.INFO,
+      "lifecycle",
+      "Центр подключён",
+      app.javaClass.simpleName
+    )
     app.currentActivityOrNull()?.let { activity ->
       currentActivity = activity
       registerActivity(activity)
@@ -86,12 +98,33 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     pendingFirebaseConfig?.let { config ->
       pendingFirebaseConfig = null
       finishInitialize(applyFirebaseConfig(app, config))
+      markReady()
+    }
+  }
+
+  /**
+   * Enables/disables the native debugging overlay. Called from `initialize`
+   * when the host passes `devPanel: true`.
+   */
+  fun setDevPanel(enabled: Boolean) {
+    runOnMain {
+      PushSignalDevPanel.setEnabled(enabled)
+      if (enabled) {
+        currentActivity?.let { PushSignalDevPanel.attach(it) }
+      }
     }
   }
 
   fun initialize(config: AndroidFirebaseConfig, onDone: (Exception?) -> Unit) {
     if (!config.hasRequiredFields()) {
+      PushSignalDevLog.add(
+        DevLogLevel.WARN,
+        "init",
+        "Firebase-конфиг неполный",
+        "initialize проигнорирован: нужны project_id, mobilesdk_app_id, current_key, project_number"
+      )
       onDone(null)
+      markReady()
       return
     }
 
@@ -103,10 +136,58 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     }
 
     onDone(applyFirebaseConfig(context, config))
+    markReady()
   }
 
   fun setOnMessage(callback: (PushMessage) -> Unit) {
     onMessage = callback
+    PushSignalDevLog.add(DevLogLevel.INFO, "listener", "JS onMessage подключён")
+    ensureReadyIfFirebaseInitialized()
+    flushPendingMessagesIfReady()
+  }
+
+  fun setOnNotificationPress(callback: (PushMessage) -> Unit) {
+    onNotificationPress = callback
+    PushSignalDevLog.add(DevLogLevel.INFO, "listener", "JS onNotificationPress подключён")
+    ensureReadyIfFirebaseInitialized()
+    flushPendingPressesIfReady()
+  }
+
+  /**
+   * Buffered taps/messages are only delivered once the push module is ready
+   * (Firebase applied or already present). This removes the cold-start race
+   * where a tap fires before initialization completes on slow devices.
+   */
+  private fun markReady() {
+    if (ready) {
+      return
+    }
+    ready = true
+    PushSignalDevLog.add(DevLogLevel.SUCCESS, "init", "Модуль готов к доставке")
+    flushPendingMessagesIfReady()
+    flushPendingPressesIfReady()
+  }
+
+  /**
+   * When Firebase is already initialized (e.g. the host uses google-services.json
+   * and never calls `initialize`), mark the module ready as soon as JS binds its
+   * listeners so buffered events are not held back indefinitely.
+   */
+  private fun ensureReadyIfFirebaseInitialized() {
+    if (ready) {
+      return
+    }
+    val app = application ?: return
+    if (FirebaseApp.getApps(app).isNotEmpty()) {
+      markReady()
+    }
+  }
+
+  private fun flushPendingMessagesIfReady() {
+    val callback = onMessage ?: return
+    if (!ready) {
+      return
+    }
     val queued = pendingMessages.toList()
     pendingMessages.clear()
     queued.forEach { message ->
@@ -114,14 +195,17 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     }
   }
 
-  fun setOnNotificationPress(callback: (PushMessage) -> Unit) {
-    onNotificationPress = callback
+  private fun flushPendingPressesIfReady() {
+    val callback = onNotificationPress ?: return
+    if (!ready) {
+      return
+    }
     val pending = synchronized(lock) {
       val queued = pendingPresses.toList()
       pendingPresses.clear()
       queued
     }
-    Log.d(TAG, "[tap] setOnNotificationPress: flushing ${pending.size} pending press(es)")
+    Log.d(TAG, "[tap] flushPendingPressesIfReady: flushing ${pending.size} pending press(es)")
     pending.forEach(callback)
   }
 
@@ -131,6 +215,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
     ensurePlayServices(context)
 
+    PushSignalDevLog.add(DevLogLevel.INFO, "token", "Запрос FCM-токена")
     try {
       if (FirebaseApp.getApps(context).isEmpty()) {
         FirebaseApp.initializeApp(context)
@@ -147,9 +232,11 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     val token = awaitTokenWithRetry(context)
 
     if (token.isNullOrEmpty()) {
+      PushSignalDevLog.add(DevLogLevel.ERROR, "token", "FCM вернул пустой токен")
       throw PushSignalException("E_FCM_TOKEN", "Firebase returned an empty FCM token")
     }
 
+    PushSignalDevLog.add(DevLogLevel.SUCCESS, "token", "FCM-токен получен", maskToken(token))
     return token
   }
 
@@ -188,6 +275,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     val diagnostics = diagnose(context)
     val message = listOfNotNull(reason, diagnostics.hint).joinToString(" ")
     Log.w(TAG, "Play services check failed ($code): $message")
+    PushSignalDevLog.add(DevLogLevel.ERROR, "provider", "Google Play services недоступны", "$code · $message")
     throw PushSignalException(code, message)
   }
 
@@ -338,6 +426,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       diagnostics.hint,
     ).joinToString(" ")
     Log.w(TAG, "Failed to get an FCM token: $message")
+    PushSignalDevLog.add(DevLogLevel.ERROR, "token", "Не удалось получить FCM-токен", message)
     throw PushSignalException("E_FCM_TOKEN", message, cause)
   }
 
@@ -362,12 +451,19 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   fun emitMessage(remoteMessage: RemoteMessage) {
     val message = remoteMessage.toPushMessage()
+    if (!markMessageDelivered(message)) {
+      Log.d(TAG, "[push] emitMessage: dropped duplicate id=${message.id}")
+      PushSignalDevLog.add(DevLogLevel.WARN, "push", "Пуш подавлен (дубликат)", message.id)
+      return
+    }
+    val where = if (startedActivityCount > 0 || currentActivity != null) "foreground" else "background"
+    PushSignalDevLog.add(DevLogLevel.SUCCESS, "push", "Пуш получен ($where)", describe(message))
     runOnMain { deliverMessage(message) }
   }
 
   private fun deliverMessage(message: PushMessage) {
     val callback = onMessage
-    if (callback == null) {
+    if (callback == null || !ready) {
       pendingMessages.add(message)
       return
     }
@@ -443,6 +539,12 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       .setNumber(1)
 
     manager.notify(requestCode, builder.build())
+    PushSignalDevLog.add(
+      DevLogLevel.INFO,
+      "push",
+      "Показано foreground-уведомление",
+      message.title ?: message.body
+    )
   }
 
   private fun smallIcon(context: Context): Int {
@@ -460,6 +562,9 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
     currentActivity = activity
     registerActivity(activity)
+    if (PushSignalDevPanel.isEnabled()) {
+      PushSignalDevPanel.attach(activity)
+    }
     handleIntent(activity.intent)
   }
 
@@ -470,6 +575,9 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   override fun onActivityResumed(activity: Activity) {
     currentActivity = activity
+    if (PushSignalDevPanel.isEnabled()) {
+      PushSignalDevPanel.attach(activity)
+    }
     handleIntent(activity.intent)
   }
 
@@ -492,6 +600,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     if (currentActivity === activity) {
       currentActivity = null
     }
+    PushSignalDevPanel.detachIfHost(activity)
   }
 
   private fun registerActivity(activity: Activity) {
@@ -552,6 +661,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private fun applyFirebaseConfig(context: Context, config: AndroidFirebaseConfig): Exception? {
     if (FirebaseApp.getApps(context).isNotEmpty()) {
       FirebaseMessaging.getInstance().isAutoInitEnabled = true
+      PushSignalDevLog.add(DevLogLevel.SUCCESS, "init", "Firebase уже инициализирован")
       return null
     }
 
@@ -569,8 +679,10 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
           .build()
       FirebaseApp.initializeApp(context, options)
       FirebaseMessaging.getInstance().isAutoInitEnabled = true
+      PushSignalDevLog.add(DevLogLevel.SUCCESS, "init", "Firebase инициализирован", config.project_id)
       null
     } catch (error: Exception) {
+      PushSignalDevLog.add(DevLogLevel.ERROR, "init", "Ошибка инициализации Firebase", error.message)
       error
     }
   }
@@ -584,11 +696,13 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private fun emitPress(message: PushMessage) {
     if (!markPressDelivered(message)) {
       Log.d(TAG, "[tap] emitPress: dropped duplicate id=${message.id}")
+      PushSignalDevLog.add(DevLogLevel.WARN, "tap", "Тап подавлен (дубликат)", message.id)
       return
     }
+    PushSignalDevLog.add(DevLogLevel.SUCCESS, "tap", "Тап по уведомлению", describe(message))
     val listener = onNotificationPress
-    Log.d(TAG, "[tap] emitPress: id=${message.id}, listenerBound=${listener != null}")
-    if (listener != null) {
+    Log.d(TAG, "[tap] emitPress: id=${message.id}, listenerBound=${listener != null}, ready=$ready")
+    if (listener != null && ready) {
       listener(message)
     } else {
       synchronized(lock) {
@@ -615,6 +729,24 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       }
       lastPressKey = key
       lastPressAt = now
+    }
+    return true
+  }
+
+  /**
+   * FCM delivers at least once, so the same [RemoteMessage] can reach
+   * `onMessageReceived` more than once. Collapse duplicates within a short
+   * window so subscribers receive exactly one `onMessage` per notification.
+   */
+  private fun markMessageDelivered(message: PushMessage): Boolean {
+    val key = message.id ?: "${message.title.orEmpty()}|${message.body.orEmpty()}"
+    val now = System.currentTimeMillis()
+    synchronized(lock) {
+      if (lastMessageKey == key && now - lastMessageAt < MESSAGE_DEDUPE_MS) {
+        return false
+      }
+      lastMessageKey = key
+      lastMessageAt = now
     }
     return true
   }
@@ -683,6 +815,20 @@ private fun AndroidFirebaseConfig.hasRequiredFields(): Boolean {
     !mobilesdk_app_id.isNullOrBlank() &&
     !current_key.isNullOrBlank() &&
     !project_number.isNullOrBlank()
+}
+
+/** One-line human summary of a message for the dev panel. */
+private fun describe(message: PushMessage): String {
+  val parts = mutableListOf<String>()
+  message.title?.takeIf { it.isNotBlank() }?.let { parts += "title=\"$it\"" }
+  message.body?.takeIf { it.isNotBlank() }?.let { parts += "body=\"$it\"" }
+  parts += "data=${message.data.size}"
+  return parts.joinToString(" ")
+}
+
+/** Keeps only the tail of a token so it is useful but not fully exposed. */
+private fun maskToken(token: String): String {
+  return if (token.length <= 10) token else "…${token.takeLast(10)}"
 }
 
 private const val EXTRA_HANDLED_KEY = "pushsignal.handled"
