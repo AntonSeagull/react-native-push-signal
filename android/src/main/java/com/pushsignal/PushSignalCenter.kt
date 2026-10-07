@@ -32,6 +32,8 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private const val TAG = "PushSignal"
   private const val EXTRA_HANDLED = "pushsignal.handled"
   private const val CHANNEL_ID = "push_signal_default"
+  /** Collapses the same tap seen through several Android entry points. */
+  private const val PRESS_DEDUPE_MS = 2_000L
   private const val TOKEN_TIMEOUT_SECONDS = 10L
   private const val TOKEN_MAX_ATTEMPTS = 5
   private const val TOKEN_INITIAL_RETRY_DELAY_MS = 1_000L
@@ -56,6 +58,8 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   @Volatile private var onMessage: ((PushMessage) -> Unit)? = null
   @Volatile private var onNotificationPress: ((PushMessage) -> Unit)? = null
   @Volatile private var pendingPress: PushMessage? = null
+  private var lastPressKey: String? = null
+  private var lastPressAt = 0L
   private val pendingMessages = CopyOnWriteArrayList<PushMessage>()
   private val registeredActivities = Collections.newSetFromMap(WeakHashMap<Activity, Boolean>())
   @Volatile private var startedActivityCount = 0
@@ -409,6 +413,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
       ?: return
     launchIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    launchIntent.putExtra(EXTRA_PRESS_KEY, true)
     launchIntent.putExtra("google.message_id", message.id ?: UUID.randomUUID().toString())
     message.title?.let { launchIntent.putExtra("gcm.notification.title", it) }
     message.body?.let { launchIntent.putExtra("gcm.notification.body", it) }
@@ -506,6 +511,29 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     emitPress(intent.toPushMessage())
   }
 
+  /**
+   * Entry point for taps observed by the React runtime. On the new architecture
+   * `ReactActivity.onNewIntent` never calls `super`, so `ComponentActivity`'s
+   * `addOnNewIntentListener` callbacks do not fire; `ReactContext` still dispatches
+   * the intent to its [com.facebook.react.bridge.ActivityEventListener]s, and the
+   * native module forwards them here. Also syncs the Activity's intent so the
+   * lifecycle fallback in `onActivityResumed` re-reads the fresh payload.
+   */
+  internal fun handleNewIntent(activity: Activity?, intent: Intent?) {
+    if (intent == null) {
+      return
+    }
+    if (activity != null) {
+      currentActivity = activity
+      try {
+        activity.intent = intent
+      } catch (_: Throwable) {
+        // Not every Activity accepts a replaced intent; the direct call still delivers.
+      }
+    }
+    handleIntent(intent)
+  }
+
   private fun applyFirebaseConfig(context: Context, config: AndroidFirebaseConfig): Exception? {
     if (FirebaseApp.getApps(context).isNotEmpty()) {
       FirebaseMessaging.getInstance().isAutoInitEnabled = true
@@ -539,6 +567,9 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   }
 
   private fun emitPress(message: PushMessage) {
+    if (!markPressDelivered(message)) {
+      return
+    }
     val listener = onNotificationPress
     if (listener != null) {
       listener(message)
@@ -547,6 +578,25 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
         pendingPress = message
       }
     }
+  }
+
+  /**
+   * Several Android entry points can observe the same tap (ReactContext's
+   * ActivityEventListener, ActivityLifecycleCallbacks, ComponentActivity's
+   * onNewIntent listener). Collapse duplicates by message id so subscribers
+   * receive exactly one press per notification.
+   */
+  private fun markPressDelivered(message: PushMessage): Boolean {
+    val key = message.id ?: "${message.title.orEmpty()}|${message.body.orEmpty()}"
+    val now = System.currentTimeMillis()
+    synchronized(lock) {
+      if (lastPressKey == key && now - lastPressAt < PRESS_DEDUPE_MS) {
+        return false
+      }
+      lastPressKey = key
+      lastPressAt = now
+    }
+    return true
   }
 }
 
@@ -572,7 +622,8 @@ private fun Application.currentActivityOrNull(): Activity? {
 
 private fun Intent.isPushTap(): Boolean {
   val extras = extras ?: return false
-  return extras.containsKey("google.message_id") ||
+  return extras.getBoolean(EXTRA_PRESS_KEY, false) ||
+    extras.containsKey("google.message_id") ||
     extras.containsKey("google.sent_time") ||
     extras.containsKey("gcm.n.e") ||
     extras.containsKey("gcm.notification.title")
@@ -582,7 +633,12 @@ private fun Intent.toPushMessage(): PushMessage {
   val extras = extras ?: Bundle()
   val data = linkedMapOf<String, String>()
   for (key in extras.keySet()) {
-    if (key.startsWith("google.") || key.startsWith("gcm.") || key == EXTRA_HANDLED_KEY) {
+    if (
+      key.startsWith("google.") ||
+      key.startsWith("gcm.") ||
+      key == EXTRA_HANDLED_KEY ||
+      key == EXTRA_PRESS_KEY
+    ) {
       continue
     }
     @Suppress("DEPRECATION")
@@ -610,6 +666,7 @@ private fun AndroidFirebaseConfig.hasRequiredFields(): Boolean {
 }
 
 private const val EXTRA_HANDLED_KEY = "pushsignal.handled"
+private const val EXTRA_PRESS_KEY = "pushsignal.press"
 
 internal fun RemoteMessage.toPushMessage(): PushMessage {
   return PushMessage(

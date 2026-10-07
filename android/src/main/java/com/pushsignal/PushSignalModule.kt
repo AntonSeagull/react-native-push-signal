@@ -1,6 +1,8 @@
 package com.pushsignal
 
+import android.content.Intent
 import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.BaseActivityEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReadableMap
@@ -12,6 +14,22 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
 
   @Volatile
   private var listening = false
+
+  /**
+   * Catches notification taps while the JS process is alive. On the new
+   * architecture `ReactActivity` swallows `onNewIntent`, so
+   * `ComponentActivity`'s own listeners never fire; the React runtime still
+   * dispatches intents to registered `ActivityEventListener`s.
+   */
+  private val activityEventListener = object : BaseActivityEventListener() {
+    override fun onNewIntent(intent: Intent) {
+      PushSignalCenter.handleNewIntent(reactApplicationContext.currentActivity, intent)
+    }
+  }
+
+  init {
+    reactApplicationContext.addActivityEventListener(activityEventListener)
+  }
 
   override fun initialize(config: ReadableMap, promise: Promise) {
     val firebaseConfig = AndroidFirebaseConfig(
@@ -71,6 +89,11 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
     PushSignalCenter.setOnNotificationPress { message ->
       emitOnNotificationPress(message.toWritableMap())
     }
+  }
+
+  override fun invalidate() {
+    reactApplicationContext.removeActivityEventListener(activityEventListener)
+    super.invalidate()
   }
 
   companion object {
