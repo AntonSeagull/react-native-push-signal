@@ -30,7 +30,7 @@ DerivedData
 project.xcworkspace
 **/.xcode.env.local
 
-.tgz
+*.tgz
 
 # Android/IJ
 #

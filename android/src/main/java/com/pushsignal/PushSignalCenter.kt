@@ -77,6 +77,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     application?.unregisterActivityLifecycleCallbacks(this)
     application = app
     app.registerActivityLifecycleCallbacks(this)
+    Log.d(TAG, "[tap] attach: lifecycle callbacks registered on ${app.javaClass.simpleName}")
     app.currentActivityOrNull()?.let { activity ->
       currentActivity = activity
       registerActivity(activity)
@@ -120,6 +121,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       pendingPresses.clear()
       queued
     }
+    Log.d(TAG, "[tap] setOnNotificationPress: flushing ${pending.size} pending press(es)")
     pending.forEach(callback)
   }
 
@@ -504,11 +506,22 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   }
 
   private fun handleIntent(intent: Intent?) {
-    if (intent == null || !intent.isPushTap() || intent.getBooleanExtra(EXTRA_HANDLED, false)) {
+    if (intent == null) {
+      Log.d(TAG, "[tap] handleIntent: null intent")
+      return
+    }
+    val extras = intent.extras
+    val keys = extras?.keySet()?.joinToString(",") ?: "none"
+    Log.d(
+      TAG,
+      "[tap] handleIntent: isPushTap=${intent.isPushTap()}, handled=${intent.getBooleanExtra(EXTRA_HANDLED, false)}, extras=[$keys]"
+    )
+    if (!intent.isPushTap() || intent.getBooleanExtra(EXTRA_HANDLED, false)) {
       return
     }
 
     intent.putExtra(EXTRA_HANDLED, true)
+    Log.d(TAG, "[tap] handleIntent: emitting press")
     emitPress(intent.toPushMessage())
   }
 
@@ -521,6 +534,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
    * lifecycle fallback in `onActivityResumed` re-reads the fresh payload.
    */
   internal fun handleNewIntent(activity: Activity?, intent: Intent?) {
+    Log.d(TAG, "[tap] handleNewIntent: activity=${activity?.javaClass?.simpleName}, action=${intent?.action}")
     if (intent == null) {
       return
     }
@@ -569,9 +583,11 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   private fun emitPress(message: PushMessage) {
     if (!markPressDelivered(message)) {
+      Log.d(TAG, "[tap] emitPress: dropped duplicate id=${message.id}")
       return
     }
     val listener = onNotificationPress
+    Log.d(TAG, "[tap] emitPress: id=${message.id}, listenerBound=${listener != null}")
     if (listener != null) {
       listener(message)
     } else {

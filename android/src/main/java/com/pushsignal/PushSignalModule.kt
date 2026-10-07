@@ -1,6 +1,7 @@
 package com.pushsignal
 
 import android.content.Intent
+import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.BaseActivityEventListener
 import com.facebook.react.bridge.Promise
@@ -23,12 +24,14 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
    */
   private val activityEventListener = object : BaseActivityEventListener() {
     override fun onNewIntent(intent: Intent) {
+      Log.d("PushSignal", "[tap] ActivityEventListener.onNewIntent: action=${intent.action}")
       PushSignalCenter.handleNewIntent(reactApplicationContext.currentActivity, intent)
     }
   }
 
   init {
     reactApplicationContext.addActivityEventListener(activityEventListener)
+    Log.d("PushSignal", "[tap] ActivityEventListener registered on ReactContext")
   }
 
   override fun initialize(config: ReadableMap, promise: Promise) {
@@ -82,11 +85,13 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
       return
     }
     listening = true
+    Log.d("PushSignal", "[tap] startListening: binding native callbacks")
 
     PushSignalCenter.setOnMessage { message ->
       emitOnMessage(message.toWritableMap())
     }
     PushSignalCenter.setOnNotificationPress { message ->
+      Log.d("PushSignal", "[tap] emitOnNotificationPress -> JS: id=${message.id}")
       emitOnNotificationPress(message.toWritableMap())
     }
   }
