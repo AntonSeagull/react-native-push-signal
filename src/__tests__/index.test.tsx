@@ -145,6 +145,51 @@ describe('pushSignal', () => {
     expect(press).toHaveBeenCalledTimes(1);
   });
 
+  it('delivers a press that arrived before any listener subscribed', () => {
+    const { onNotificationPress } =
+      require('../pushSignal.native') as typeof import('../pushSignal.native');
+
+    const payload = { id: 'p1', title: 'Hi', data: { a: '1' } };
+    // Native flush happens at module import, before the host app subscribes.
+    pressHandlers[0]?.(payload);
+
+    const press = jest.fn();
+    onNotificationPress(press);
+
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(press).toHaveBeenCalledWith(payload);
+  });
+
+  it('delivers a message that arrived before any listener subscribed', () => {
+    const { onMessage } =
+      require('../pushSignal.native') as typeof import('../pushSignal.native');
+
+    const payload = { title: 'Hi', data: { a: '1' } };
+    messageHandlers[0]?.(payload);
+
+    const message = jest.fn(() => undefined);
+    onMessage(message);
+
+    expect(message).toHaveBeenCalledTimes(1);
+    expect(message).toHaveBeenCalledWith(payload);
+  });
+
+  it('does not replay a queued press twice', () => {
+    const { onNotificationPress } =
+      require('../pushSignal.native') as typeof import('../pushSignal.native');
+
+    const payload = { id: 'p2', title: 'Hi', data: {} };
+    pressHandlers[0]?.(payload);
+
+    const first = jest.fn();
+    onNotificationPress(first);
+    const second = jest.fn();
+    onNotificationPress(second);
+
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).not.toHaveBeenCalled();
+  });
+
   it('delivers the message even when a listener throws', () => {
     const { onMessage } =
       require('../pushSignal.native') as typeof import('../pushSignal.native');

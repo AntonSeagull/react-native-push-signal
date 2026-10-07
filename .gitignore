@@ -30,6 +30,8 @@ DerivedData
 project.xcworkspace
 **/.xcode.env.local
 
+.tgz
+
 # Android/IJ
 #
 .classpath

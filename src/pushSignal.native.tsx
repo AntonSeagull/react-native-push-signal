@@ -16,6 +16,62 @@ const messageListeners = new Set<OnMessageListener>();
 const pressListeners = new Set<(message: PushMessage) => void>();
 let nativeCallbacksBound = false;
 
+/**
+ * Messages and taps can arrive before the host app subscribes (the native side
+ * flushes its queue as soon as the JS module is evaluated, which happens long
+ * before a screen mounts and calls `onMessage` / `onNotificationPress`). Keep
+ * them here and replay to the first subscriber instead of dropping them.
+ */
+const queuedMessages: PushMessage[] = [];
+const queuedPresses: PushMessage[] = [];
+const MAX_QUEUED_EVENTS = 20;
+
+function enqueue(queue: PushMessage[], message: PushMessage): void {
+  queue.push(message);
+  if (queue.length > MAX_QUEUED_EVENTS) {
+    queue.splice(0, queue.length - MAX_QUEUED_EVENTS);
+  }
+}
+
+function deliverMessage(message: PushMessage): void {
+  for (const listener of [...messageListeners]) {
+    try {
+      Promise.resolve(listener(message)).then(
+        () => undefined,
+        () => undefined
+      );
+    } catch {
+      // Ignore listener failures so one bad subscriber cannot break delivery.
+    }
+  }
+}
+
+function deliverPress(message: PushMessage): void {
+  for (const listener of [...pressListeners]) {
+    try {
+      listener(message);
+    } catch {
+      // Ignore listener failures so one bad subscriber cannot break delivery.
+    }
+  }
+}
+
+function flushQueuedMessages(): void {
+  if (queuedMessages.length === 0 || messageListeners.size === 0) {
+    return;
+  }
+  const queued = queuedMessages.splice(0, queuedMessages.length);
+  queued.forEach(deliverMessage);
+}
+
+function flushQueuedPresses(): void {
+  if (queuedPresses.length === 0 || pressListeners.size === 0) {
+    return;
+  }
+  const queued = queuedPresses.splice(0, queuedPresses.length);
+  queued.forEach(deliverPress);
+}
+
 function normalizeMessage(raw: {
   id?: string;
   title?: string;
@@ -106,21 +162,20 @@ function bindNativeCallbacks() {
 
   NativePushSignal.onMessage((raw) => {
     const message = normalizeMessage(raw);
-    for (const listener of [...messageListeners]) {
-      try {
-        Promise.resolve(listener(message)).then(
-          () => undefined,
-          () => undefined
-        );
-      } catch {
-        // Ignore listener failures so one bad subscriber cannot break delivery.
-      }
+    if (messageListeners.size === 0) {
+      enqueue(queuedMessages, message);
+      return;
     }
+    deliverMessage(message);
   });
 
   NativePushSignal.onNotificationPress((raw) => {
     const message = normalizeMessage(raw);
-    pressListeners.forEach((listener) => listener(message));
+    if (pressListeners.size === 0) {
+      enqueue(queuedPresses, message);
+      return;
+    }
+    deliverPress(message);
   });
 
   NativePushSignal.startListening();
@@ -152,6 +207,7 @@ export async function getDiagnostics(): Promise<PushDiagnostics> {
 export function onMessage(listener: OnMessageListener): () => void {
   bindNativeCallbacks();
   messageListeners.add(listener);
+  flushQueuedMessages();
   return () => {
     messageListeners.delete(listener);
   };
@@ -162,6 +218,7 @@ export function onNotificationPress(
 ): () => void {
   bindNativeCallbacks();
   pressListeners.add(listener);
+  flushQueuedPresses();
   return () => {
     pressListeners.delete(listener);
   };

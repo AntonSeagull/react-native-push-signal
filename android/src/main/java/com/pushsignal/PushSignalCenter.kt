@@ -34,6 +34,9 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private const val CHANNEL_ID = "push_signal_default"
   /** Collapses the same tap seen through several Android entry points. */
   private const val PRESS_DEDUPE_MS = 2_000L
+
+  /** Upper bound for taps buffered before JS subscribes. */
+  private const val MAX_PENDING_PRESSES = 20
   private const val TOKEN_TIMEOUT_SECONDS = 10L
   private const val TOKEN_MAX_ATTEMPTS = 5
   private const val TOKEN_INITIAL_RETRY_DELAY_MS = 1_000L
@@ -57,7 +60,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   @Volatile private var currentActivity: Activity? = null
   @Volatile private var onMessage: ((PushMessage) -> Unit)? = null
   @Volatile private var onNotificationPress: ((PushMessage) -> Unit)? = null
-  @Volatile private var pendingPress: PushMessage? = null
+  private val pendingPresses = ArrayDeque<PushMessage>()
   private var lastPressKey: String? = null
   private var lastPressAt = 0L
   private val pendingMessages = CopyOnWriteArrayList<PushMessage>()
@@ -113,13 +116,11 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   fun setOnNotificationPress(callback: (PushMessage) -> Unit) {
     onNotificationPress = callback
     val pending = synchronized(lock) {
-      val message = pendingPress
-      pendingPress = null
-      message
+      val queued = pendingPresses.toList()
+      pendingPresses.clear()
+      queued
     }
-    if (pending != null) {
-      callback(pending)
-    }
+    pending.forEach(callback)
   }
 
   fun fetchToken(): String {
@@ -575,7 +576,10 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       listener(message)
     } else {
       synchronized(lock) {
-        pendingPress = message
+        pendingPresses.addLast(message)
+        while (pendingPresses.size > MAX_PENDING_PRESSES) {
+          pendingPresses.removeFirst()
+        }
       }
     }
   }
