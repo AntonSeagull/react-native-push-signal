@@ -5,10 +5,14 @@ type MessageHandler = (message: {
   title?: string;
   body?: string;
   data: Object;
+  image?: string;
+  buttons?: Array<{ id: string; title: string; [key: string]: unknown }>;
+  action?: string;
 }) => void;
 
 const messageHandlers: MessageHandler[] = [];
 const pressHandlers: MessageHandler[] = [];
+const actionHandlers: MessageHandler[] = [];
 
 const mockNative = {
   initialize: jest.fn(async () => undefined),
@@ -37,6 +41,10 @@ const mockNative = {
     pressHandlers.push(handler);
     return { remove: () => undefined };
   }),
+  onNotificationAction: jest.fn((handler: MessageHandler) => {
+    actionHandlers.push(handler);
+    return { remove: () => undefined };
+  }),
 };
 
 jest.mock('../NativePushSignal', () => ({
@@ -50,6 +58,7 @@ describe('pushSignal', () => {
     jest.resetModules();
     messageHandlers.length = 0;
     pressHandlers.length = 0;
+    actionHandlers.length = 0;
   });
 
   it('forwards initialize and credential calls to the native module', async () => {
@@ -158,6 +167,33 @@ describe('pushSignal', () => {
 
     expect(press).toHaveBeenCalledTimes(1);
     expect(press).toHaveBeenCalledWith(payload);
+  });
+
+  it('delivers a button action with the pressed button payload', () => {
+    const { onNotificationAction } =
+      require('../pushSignal.native') as typeof import('../pushSignal.native');
+
+    const listener = jest.fn();
+    const unsubscribe = onNotificationAction(listener);
+
+    const payload = {
+      id: 'a1',
+      title: 'Hi',
+      data: { url: 'https://example.com' },
+      buttons: [
+        { id: 'like', title: 'Like', url: 'https://example.com/like' },
+        { id: 'open', title: 'Open' },
+      ],
+      action: 'like',
+    };
+    actionHandlers[0]?.(payload);
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith(payload, payload.buttons[0]);
+
+    unsubscribe();
+    actionHandlers[0]?.(payload);
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 
   it('delivers a message that arrived before any listener subscribed', () => {

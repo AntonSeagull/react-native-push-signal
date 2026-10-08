@@ -26,6 +26,8 @@
   __weak id<UNUserNotificationCenterDelegate> _forwardingDelegate;
   void (^_onMessage)(NSDictionary *);
   void (^_onNotificationPress)(NSDictionary *);
+  void (^_onNotificationAction)(NSDictionary *);
+  NSMutableArray<NSDictionary *> *_pendingActions;
 }
 
 + (instancetype)shared {
@@ -52,6 +54,7 @@
     _lock = [[NSLock alloc] init];
     _tokenWaiters = [NSMutableArray array];
     _pendingMessages = [NSMutableArray array];
+    _pendingActions = [NSMutableArray array];
     _recentMessageIds = [NSMutableDictionary dictionary];
   }
   return self;
@@ -99,6 +102,11 @@
   [self flushPendingPress];
 }
 
+- (void)setOnNotificationAction:(void (^)(NSDictionary *))callback {
+  _onNotificationAction = [callback copy];
+  [self flushPendingActions];
+}
+
 - (void)fetchCredentialsWithResolver:(void (^)(NSDictionary *))resolve
                             rejecter:(void (^)(NSError *))reject {
   dispatch_async(dispatch_get_main_queue(), ^{
@@ -144,7 +152,25 @@
 - (void)userNotificationCenter:(UNUserNotificationCenter *)center
 didReceiveNotificationResponse:(UNNotificationResponse *)response
          withCompletionHandler:(void (^)(void))completionHandler {
-  [self emitPress:[PushSignalCenter messageFromNotification:response.notification]];
+  NSString *actionIdentifier = response.actionIdentifier;
+  NSDictionary *message = [PushSignalCenter messageFromNotification:response.notification];
+
+  if ([actionIdentifier isEqualToString:UNNotificationDismissActionIdentifier]) {
+    // User swiped the notification away; nothing to report.
+  } else if ([actionIdentifier isEqualToString:UNNotificationDefaultActionIdentifier]) {
+    [self emitPress:message];
+  } else {
+    NSString *buttonId = [PushSignalCenter buttonIdFromActionIdentifier:actionIdentifier];
+    if (buttonId != nil) {
+      NSMutableDictionary *withAction = [message mutableCopy];
+      withAction[@"action"] = buttonId;
+      [self emitAction:withAction];
+    } else {
+      // Unknown non-system action: treat as a plain tap so nothing is lost.
+      [self emitPress:message];
+    }
+  }
+
   SEL selector = @selector(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:);
   id<UNUserNotificationCenterDelegate> forwarding = _forwardingDelegate;
   if (forwarding != nil && [forwarding respondsToSelector:selector]) {
@@ -323,6 +349,38 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
   });
 }
 
+- (void)emitAction:(NSDictionary *)message {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (self->_onNotificationAction != nil) {
+      self->_onNotificationAction(message);
+    } else {
+      [self->_pendingActions addObject:message];
+      if (self->_pendingActions.count > 20) {
+        [self->_pendingActions removeObjectAtIndex:0];
+      }
+    }
+  });
+}
+
+- (void)flushPendingActions {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    void (^callback)(NSDictionary *) = nil;
+    NSArray<NSDictionary *> *queued = nil;
+    [self->_lock lock];
+    callback = self->_onNotificationAction;
+    queued = [self->_pendingActions copy];
+    [self->_pendingActions removeAllObjects];
+    [self->_lock unlock];
+
+    if (callback == nil || queued.count == 0) {
+      return;
+    }
+    for (NSDictionary *message in queued) {
+      [self emitToJs:callback message:message];
+    }
+  });
+}
+
 - (void)captureLaunchNotificationIfNeeded {
   if (_didCaptureLaunchNotification) {
     return;
@@ -444,7 +502,65 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
     message[@"body"] = resolvedBody;
   }
   message[@"data"] = data;
+
+  NSString *image = [self stringify:userInfo[@"image"]];
+  if (image.length > 0) {
+    message[@"image"] = image;
+  }
+  NSArray *buttons = [self buttonsFromUserInfo:userInfo];
+  if (buttons.count > 0) {
+    message[@"buttons"] = buttons;
+  }
   return message;
+}
+
++ (nullable NSArray *)buttonsFromUserInfo:(NSDictionary *)userInfo {
+  id raw = userInfo[@"buttons"];
+  if ([raw isKindOfClass:[NSArray class]]) {
+    return raw;
+  }
+  if (![raw isKindOfClass:[NSString class]]) {
+    return nil;
+  }
+  NSData *jsonData = [(NSString *)raw dataUsingEncoding:NSUTF8StringEncoding];
+  if (jsonData == nil) {
+    return nil;
+  }
+  id parsed = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:nil];
+  if (![parsed isKindOfClass:[NSArray class]]) {
+    return nil;
+  }
+
+  NSMutableArray *buttons = [NSMutableArray array];
+  for (id item in (NSArray *)parsed) {
+    if (![item isKindOfClass:[NSDictionary class]]) {
+      continue;
+    }
+    NSDictionary *button = (NSDictionary *)item;
+    NSString *buttonId = [self stringify:button[@"id"]];
+    NSString *title = [self stringify:button[@"title"]];
+    if (buttonId.length == 0 || title.length == 0) {
+      continue;
+    }
+    [buttons addObject:button];
+  }
+  return buttons.count > 0 ? buttons : nil;
+}
+
++ (NSString *)actionIdentifierPrefix {
+  return @"ps:";
+}
+
++ (nullable NSString *)buttonIdFromActionIdentifier:(NSString *)actionIdentifier {
+  if (actionIdentifier == nil) {
+    return nil;
+  }
+  NSString *prefix = [self actionIdentifierPrefix];
+  if (![actionIdentifier hasPrefix:prefix]) {
+    return nil;
+  }
+  NSString *buttonId = [actionIdentifier substringFromIndex:prefix.length];
+  return buttonId.length > 0 ? buttonId : nil;
 }
 
 + (nullable NSString *)stringify:(id)value {

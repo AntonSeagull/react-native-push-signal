@@ -98,6 +98,10 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
       Log.d("PushSignal", "[tap] emitOnNotificationPress -> JS: id=${message.id}")
       emitOnNotificationPress(message.toWritableMap())
     }
+    PushSignalCenter.setOnNotificationAction { message ->
+      Log.d("PushSignal", "[action] emitOnNotificationAction -> JS: action=${message.action}")
+      emitOnNotificationAction(message.toWritableMap())
+    }
   }
 
   override fun invalidate() {
@@ -129,6 +133,22 @@ private fun PushMessage.toWritableMap(): WritableMap {
     dataMap.putString(key, value)
   }
   map.putMap("data", dataMap)
+  image?.let { map.putString("image", it) }
+  action?.let { map.putString("action", it) }
+  if (buttons.isNotEmpty()) {
+    val buttonsArray = Arguments.createArray()
+    buttons.forEach { button ->
+      val buttonMap = Arguments.createMap().apply {
+        putString("id", button.id)
+        putString("title", button.title)
+        button.extras.forEach { (key, value) ->
+          putString(key, value)
+        }
+      }
+      buttonsArray.pushMap(buttonMap)
+    }
+    map.putArray("buttons", buttonsArray)
+  }
   return map
 }
 

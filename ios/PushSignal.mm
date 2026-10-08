@@ -61,6 +61,13 @@
     }
     [strongSelf emitOnNotificationPress:message];
   }];
+  [[PushSignalCenter shared] setOnNotificationAction:^(NSDictionary *message) {
+    PushSignal *strongSelf = weakSelf;
+    if (strongSelf == nil) {
+      return;
+    }
+    [strongSelf emitOnNotificationAction:message];
+  }];
 }
 
 - (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:

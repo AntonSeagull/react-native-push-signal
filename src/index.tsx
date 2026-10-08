@@ -1,6 +1,8 @@
 export type {
   AndroidFirebaseConfig,
   OnMessageListener,
+  OnNotificationActionListener,
+  PushButton,
   PushCredentials,
   PushDiagnostics,
   PushEnvironment,
@@ -14,5 +16,6 @@ export {
   getDiagnostics,
   initialize,
   onMessage,
+  onNotificationAction,
   onNotificationPress,
 } from './pushSignal';

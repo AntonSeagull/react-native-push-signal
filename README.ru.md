@@ -22,6 +22,7 @@ import {
   getCredentials,
   initialize,
   onMessage,
+  onNotificationAction,
   onNotificationPress,
 } from 'react-native-push-signal';
 
@@ -47,6 +48,11 @@ const stopMessages = onMessage((message) => {
 const stopPress = onNotificationPress((message) => {
   console.log('opened from notification', message);
 });
+
+const stopAction = onNotificationAction((message, button) => {
+  // button — нажатая кнопка целиком, включая её дополнительные поля
+  console.log('button pressed', button.id, button);
+});
 ```
 
 Если приложение открыли из уведомления до подписки, `onNotificationPress` всё равно отдаст этот тап сразу после `onNotificationPress(...)`.
@@ -69,6 +75,26 @@ const stopPress = onNotificationPress((message) => {
 3. Проверяйте на физическом устройстве. Симулятор не умеет регистрироваться в APNs.
 
 Библиотека сама ставит делегат `UNUserNotificationCenter` на запуске (до JS) и подписывается на колбеки APNs-токена. В `AppDelegate` хоста ничего дописывать не нужно. Без делегата до конца запуска iOS не вызывает `willPresent`, и пуш в foreground не доходит до JS.
+
+### Картинка и кнопки: Notification Service Extension
+
+Картинка и динамические кнопки на iOS добавляются через Notification Service Extension. Без него iOS проигнорирует `image` и `buttons`, а сам пуш придёт как обычный.
+
+1. В Xcode создайте target **Notification Service Extension** (`File → New → Target`).
+2. У extension-таргета укажите bundle id вида `<ваш.bundle.id>.pushsignal`.
+3. Подключите исходники расширения. В Podfile добавьте в цель extension:
+
+```ruby
+target 'YourNotificationServiceExtension' do
+  pod 'PushSignalNotificationServiceExtension', :path => '../node_modules/react-native-push-signal'
+end
+```
+
+Либо добавьте файлы `ios/NotificationServiceExtension/NotificationService.{h,m}` в extension-таргет вручную.
+
+4. В `Info.plist` extension-таргета задайте `NSExtension` → `NSExtensionPointIdentifier` = `com.apple.usernotifications.service` (Xcode ставит это сам при создании через шаблон).
+
+Сервер должен слать `aps.mutable-content = 1` для пушей с картинкой или кнопками — иначе extension не запустится.
 
 ## Настройка Android
 
@@ -204,12 +230,69 @@ await initialize({
 
 - `onMessage` — пуш пришёл, пока приложение на переднем плане (и Android data-message, пока процесс жив). Слушатель только получает payload и не управляет баннером.
 - `onNotificationPress` — пользователь открыл уведомление, в том числе при холодном старте.
+- `onNotificationAction` — пользователь нажал кнопку уведомления. Получает всё сообщение и нажатую кнопку целиком.
 - На iOS видимый пуш в фоне или при убитом приложении приходит только в тап, не в `onMessage`. Это ограничение ОС.
 - На Android повторные доставки схлопываются: одно и то же входящее сообщение в пределах 500 мс и одно и то же нажатие в пределах 2 с отдаются подписчикам один раз. При холодном старте нажатие буферизуется до инициализации пуш-модуля, а затем доставляется вместе с данными нажатого уведомления.
 
+## Картинка и кнопки в уведомлении
+
+> Пошаговая настройка (особенно iOS-extension) — в [SETUP_RICH_CONTENT.md](SETUP_RICH_CONTENT.md).
+
+Сервер может добавить в пуш картинку и кнопки с произвольным payload. Формат пейлоада (обе платформы):
+```jsonc
+// данные пуша (data):
+{
+  "image": "https://example.com/pic.jpg",         // URL картинки
+  "buttons": "[{\"id\":\"like\",\"title\":\"Нравится\",\"url\":\"https://example.com/like\"},{\"id\":\"open\",\"title\":\"Открыть\"}]"
+}
+```
+
+- `image` — строка-URL. На Android показывается как большая картинка (BigPictureStyle), на iOS — через extension.
+- `buttons` — JSON-массив кнопок. Каждая кнопка: `id` (уникальный), `title` (подпись) и любые дополнительные поля (`url`, deep link, action и т.д.) — они приходят в JS целиком.
+
+При нажатии кнопки срабатывает `onNotificationAction(message, button)`, где `button` — объект нажатой кнопки со всеми её полями, а `message.buttons` — полный список кнопок этого уведомления:
+
+```ts
+import { onNotificationAction } from 'react-native-push-signal';
+
+onNotificationAction((message, button) => {
+  console.log('message', message);       // всё уведомление (id, title, body, data, buttons)
+  console.log('button', button);         // { id: 'like', title: 'Нравится', url: '...' }
+  if (button.id === 'like') {
+    // обработка именно этой кнопки, с её payload
+  }
+});
+```
+
+Типы:
+
+```ts
+export interface PushButton {
+  id: string;
+  title: string;
+  [key: string]: unknown; // любые дополнительные поля
+}
+
+export interface PushMessage {
+  id?: string;
+  title?: string;
+  body?: string;
+  data: Record<string, string>;
+  image?: string;
+  buttons?: PushButton[];
+  action?: string; // id нажатой кнопки (только в onNotificationAction)
+}
+```
+
+Особенности iOS:
+
+- Кнопки и картинка из пейлоада работают **только** с подключённым Notification Service Extension (см. [Картинка и кнопки: Notification Service Extension](#картинка-и-кнопки-notification-service-extension)).
+- iOS не передаёт произвольный payload через кнопку — приложение получает лишь `id` нажатой кнопки. Библиотека восстанавливает полный объект кнопки из `message.buttons` по `id`, поэтому в JS вы получаете кнопку целиком, как на Android.
+- Нажатие по телу уведомления (`UNNotificationDefaultActionIdentifier`) по-прежнему идёт в `onNotificationPress`, а не в `onNotificationAction`.
+
 ## Web
 
-`initialize()` резолвится. `getCredentials()` бросает ошибку. Слушатели (`onMessage`, `onNotificationPress`) ничего не делают.
+`initialize()` резолвится. `getCredentials()` бросает ошибку. Слушатели (`onMessage`, `onNotificationPress`, `onNotificationAction`) ничего не делают.
 
 ## Contributing
 

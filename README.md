@@ -22,6 +22,7 @@ import {
   getCredentials,
   initialize,
   onMessage,
+  onNotificationAction,
   onNotificationPress,
 } from 'react-native-push-signal';
 
@@ -47,6 +48,11 @@ const stopMessages = onMessage((message) => {
 const stopPress = onNotificationPress((message) => {
   console.log('opened from notification', message);
 });
+
+const stopAction = onNotificationAction((message, button) => {
+  // button — the pressed button, including its extra fields
+  console.log('button pressed', button.id, button);
+});
 ```
 
 `onNotificationPress` also delivers the tap that launched the app if you subscribe after startup.
@@ -69,6 +75,26 @@ Keep Apple `.p8` keys and the Firebase service account on the server. The app ne
 3. Use a physical device. The simulator cannot register with APNs.
 
 The library hooks `UNUserNotificationCenter` at launch (before JS starts) and APNs token callbacks, so the host `AppDelegate` does not need extra code. Foreground pushes only reach JS if this delegate is installed before launch finishes.
+
+### Images and buttons: Notification Service Extension
+
+Rich images and dynamic action buttons on iOS are added through a Notification Service Extension. Without it, iOS ignores `image` and `buttons` and the push arrives as a plain notification.
+
+1. In Xcode create a **Notification Service Extension** target (`File → New → Target`).
+2. Give the extension target a bundle id like `<your.bundle.id>.pushsignal`.
+3. Add the extension sources. In the Podfile, add to the extension target:
+
+```ruby
+target 'YourNotificationServiceExtension' do
+  pod 'PushSignalNotificationServiceExtension', :path => '../node_modules/react-native-push-signal'
+end
+```
+
+Or add `ios/NotificationServiceExtension/NotificationService.{h,m}` to the extension target manually.
+
+4. In the extension target's `Info.plist`, set `NSExtension` → `NSExtensionPointIdentifier` = `com.apple.usernotifications.service` (Xcode sets this when creating from the template).
+
+The server must send `aps.mutable-content = 1` for pushes with an image or buttons, otherwise the extension will not run.
 
 ## Android setup
 
@@ -204,12 +230,70 @@ The panel uses only platform views, adds no dependencies and is a no-op on iOS a
 
 - `onMessage` — the push arrived while the app is in the foreground (and Android data messages while the process is alive). Listeners only receive the payload; they do not control the banner.
 - `onNotificationPress` — the user opened the notification, including a cold start.
+- `onNotificationAction` — the user tapped a notification action button. Receives the full message and the pressed button.
 - On iOS, a visible push received in the background or when the app is killed is delivered on tap, not through `onMessage`. That is an OS limit.
 - On Android duplicate deliveries are collapsed: the same incoming message within 500 ms and the same tap within 2 s are emitted to subscribers once. On a cold start the tap is buffered until the push module is initialized, then delivered with the tapped notification's payload.
 
+## Images and action buttons
+
+> Step-by-step setup (especially the iOS extension) — see [SETUP_RICH_CONTENT.md](SETUP_RICH_CONTENT.md).
+
+The server can attach an image and buttons with arbitrary payload. Payload format (both platforms):
+
+```jsonc
+// push data:
+{
+  "image": "https://example.com/pic.jpg",         // image URL
+  "buttons": "[{\"id\":\"like\",\"title\":\"Like\",\"url\":\"https://example.com/like\"},{\"id\":\"open\",\"title\":\"Open\"}]"
+}
+```
+
+- `image` — a URL string. Shown as a big picture on Android (BigPictureStyle) and via the extension on iOS.
+- `buttons` — a JSON array of buttons. Each button has `id` (unique), `title` (label) and any extra fields (`url`, deep link, action, ...) — they are delivered to JS in full.
+
+Tapping a button fires `onNotificationAction(message, button)`, where `button` is the pressed button with all its fields, and `message.buttons` is the full list of buttons for that notification:
+
+```ts
+import { onNotificationAction } from 'react-native-push-signal';
+
+onNotificationAction((message, button) => {
+  console.log('message', message);       // full notification (id, title, body, data, buttons)
+  console.log('button', button);         // { id: 'like', title: 'Like', url: '...' }
+  if (button.id === 'like') {
+    // handle this specific button with its payload
+  }
+});
+```
+
+Types:
+
+```ts
+export interface PushButton {
+  id: string;
+  title: string;
+  [key: string]: unknown; // any extra fields
+}
+
+export interface PushMessage {
+  id?: string;
+  title?: string;
+  body?: string;
+  data: Record<string, string>;
+  image?: string;
+  buttons?: PushButton[];
+  action?: string; // pressed button id (only in onNotificationAction)
+}
+```
+
+iOS specifics:
+
+- Images and payload buttons only work with a connected Notification Service Extension (see [Images and buttons: Notification Service Extension](#images-and-buttons-notification-service-extension)).
+- iOS does not pass arbitrary payload through a button — the app only receives the pressed button's `id`. The library reconstructs the full button object from `message.buttons` by `id`, so JS receives the whole button, just like on Android.
+- A tap on the notification body (`UNNotificationDefaultActionIdentifier`) still goes to `onNotificationPress`, not `onNotificationAction`.
+
 ## Web
 
-`initialize()` resolves. `getCredentials()` throws. Listeners (`onMessage`, `onNotificationPress`) are no-ops.
+`initialize()` resolves. `getCredentials()` throws. Listeners (`onMessage`, `onNotificationPress`, `onNotificationAction`) are no-ops.
 
 ## Contributing
 

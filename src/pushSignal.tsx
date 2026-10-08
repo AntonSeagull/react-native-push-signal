@@ -4,6 +4,7 @@ import type {
   PushCredentials,
   PushDiagnostics,
   PushMessage,
+  PushButton,
 } from './types';
 
 export async function initialize(
@@ -24,6 +25,12 @@ export function onMessage(_listener: OnMessageListener): () => void {
 
 export function onNotificationPress(
   _listener: (message: PushMessage) => void
+): () => void {
+  return () => {};
+}
+
+export function onNotificationAction(
+  _listener: (message: PushMessage, button: PushButton) => void
 ): () => void {
   return () => {};
 }

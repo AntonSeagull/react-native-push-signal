@@ -62,9 +62,11 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   @Volatile private var currentActivity: Activity? = null
   @Volatile private var onMessage: ((PushMessage) -> Unit)? = null
   @Volatile private var onNotificationPress: ((PushMessage) -> Unit)? = null
+  @Volatile private var onNotificationAction: ((PushMessage) -> Unit)? = null
   /** False until the push module (Firebase) is initialized or already present. */
   @Volatile private var ready = false
   private val pendingPresses = ArrayDeque<PushMessage>()
+  private val pendingActions = ArrayDeque<PushMessage>()
   private var lastPressKey: String? = null
   private var lastPressAt = 0L
   private val pendingMessages = CopyOnWriteArrayList<PushMessage>()
@@ -153,6 +155,13 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     flushPendingPressesIfReady()
   }
 
+  fun setOnNotificationAction(callback: (PushMessage) -> Unit) {
+    onNotificationAction = callback
+    PushSignalDevLog.add(DevLogLevel.INFO, "listener", "JS onNotificationAction подключён")
+    ensureReadyIfFirebaseInitialized()
+    flushPendingActionsIfReady()
+  }
+
   /**
    * Buffered taps/messages are only delivered once the push module is ready
    * (Firebase applied or already present). This removes the cold-start race
@@ -166,6 +175,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     PushSignalDevLog.add(DevLogLevel.SUCCESS, "init", "Модуль готов к доставке")
     flushPendingMessagesIfReady()
     flushPendingPressesIfReady()
+    flushPendingActionsIfReady()
   }
 
   /**
@@ -206,6 +216,20 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       queued
     }
     Log.d(TAG, "[tap] flushPendingPressesIfReady: flushing ${pending.size} pending press(es)")
+    pending.forEach(callback)
+  }
+
+  private fun flushPendingActionsIfReady() {
+    val callback = onNotificationAction ?: return
+    if (!ready) {
+      return
+    }
+    val pending = synchronized(lock) {
+      val queued = pendingActions.toList()
+      pendingActions.clear()
+      queued
+    }
+    Log.d(TAG, "[action] flushPendingActionsIfReady: flushing ${pending.size} pending action(s)")
     pending.forEach(callback)
   }
 
@@ -538,13 +562,113 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       .setDefaults(NotificationCompat.DEFAULT_SOUND)
       .setNumber(1)
 
-    manager.notify(requestCode, builder.build())
+    message.buttons.forEachIndexed { index, button ->
+      builder.addAction(0, button.title, actionPendingIntent(context, message, button, index))
+    }
+
+    val imageUrl = message.image?.takeIf { it.isNotBlank() }
+    if (imageUrl == null) {
+      manager.notify(requestCode, builder.build())
+      logForegroundPosted(message)
+      return
+    }
+
+    // Fetch the image off the main thread, then post with a big-picture style.
+    fetchBitmap(imageUrl) { bitmap ->
+      if (bitmap != null) {
+        builder.setLargeIcon(bitmap)
+        builder.setStyle(NotificationCompat.BigPictureStyle().bigPicture(bitmap))
+      }
+      manager.notify(requestCode, builder.build())
+      logForegroundPosted(message)
+    }
+  }
+
+  private fun logForegroundPosted(message: PushMessage) {
     PushSignalDevLog.add(
       DevLogLevel.INFO,
       "push",
       "Показано foreground-уведомление",
       message.title ?: message.body
     )
+  }
+
+  private fun actionPendingIntent(
+    context: Context,
+    message: PushMessage,
+    button: PushButton,
+    index: Int
+  ): PendingIntent {
+    val intent = Intent(context, PushSignalActionReceiver::class.java)
+    intent.putExtra(EXTRA_ACTION_KEY, true)
+    intent.putExtra(EXTRA_ACTION_ID, button.id)
+    intent.putExtra("google.message_id", message.id ?: UUID.randomUUID().toString())
+    message.title?.let { intent.putExtra("gcm.notification.title", it) }
+    message.body?.let { intent.putExtra("gcm.notification.body", it) }
+    message.data.forEach { (key, value) ->
+      intent.putExtra(key, value)
+    }
+    val requestCode = ((message.id ?: message.title ?: "push") + "#" + button.id + "#" + index).hashCode()
+    return PendingIntent.getBroadcast(
+      context,
+      requestCode,
+      intent,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+  }
+
+  /**
+   * Downloads a bitmap from [url] on a background thread. Never throws; a null
+   * result means "no image" and the notification is still posted.
+   */
+  private fun fetchBitmap(url: String, onDone: (android.graphics.Bitmap?) -> Unit) {
+    Thread {
+      var bitmap: android.graphics.Bitmap? = null
+      try {
+        val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 10_000
+        connection.instanceFollowRedirects = true
+        connection.useCaches = true
+        connection.connect()
+        if (connection.responseCode in 200..299) {
+          connection.inputStream.use { stream ->
+            val factory = android.graphics.BitmapFactory.Options().apply {
+              inSampleSize = 2
+            }
+            bitmap = android.graphics.BitmapFactory.decodeStream(stream, null, factory)
+          }
+        }
+      } catch (_: Throwable) {
+        bitmap = null
+      }
+      runOnMain { onDone(bitmap) }
+    }.start()
+  }
+
+  /**
+   * Handles a button tap delivered through [PushSignalActionReceiver]. Rebuilds
+   * the full message, marks the pressed button id and forwards it to JS.
+   */
+  fun handleAction(intent: Intent?) {
+    if (intent == null || !intent.getBooleanExtra(EXTRA_ACTION_KEY, false)) {
+      return
+    }
+    val actionId = intent.getStringExtra(EXTRA_ACTION_ID) ?: return
+    val message = intent.toPushMessage().copy(action = actionId)
+    PushSignalDevLog.add(DevLogLevel.SUCCESS, "action", "Нажата кнопка уведомления", actionId)
+    val listener = onNotificationAction
+    Log.d(TAG, "[action] handleAction: id=$actionId, listenerBound=${listener != null}, ready=$ready")
+    if (listener != null && ready) {
+      listener(message)
+    } else {
+      synchronized(lock) {
+        pendingActions.addLast(message)
+        while (pendingActions.size > MAX_PENDING_PRESSES) {
+          pendingActions.removeFirst()
+        }
+      }
+    }
   }
 
   private fun smallIcon(context: Context): Int {
@@ -789,7 +913,9 @@ private fun Intent.toPushMessage(): PushMessage {
       key.startsWith("google.") ||
       key.startsWith("gcm.") ||
       key == EXTRA_HANDLED_KEY ||
-      key == EXTRA_PRESS_KEY
+      key == EXTRA_PRESS_KEY ||
+      key == EXTRA_ACTION_KEY ||
+      key == EXTRA_ACTION_ID
     ) {
       continue
     }
@@ -806,7 +932,9 @@ private fun Intent.toPushMessage(): PushMessage {
     extras.getString("gcm.n.body")
       ?: extras.getString("gcm.notification.body")
       ?: extras.getString("body"),
-    data
+    data,
+    image = data[DATA_KEY_IMAGE],
+    buttons = parseButtons(data[DATA_KEY_BUTTONS])
   )
 }
 
@@ -833,12 +961,48 @@ private fun maskToken(token: String): String {
 
 private const val EXTRA_HANDLED_KEY = "pushsignal.handled"
 private const val EXTRA_PRESS_KEY = "pushsignal.press"
+private const val EXTRA_ACTION_KEY = "pushsignal.action"
+private const val EXTRA_ACTION_ID = "pushsignal.action.id"
+private const val DATA_KEY_IMAGE = "image"
+private const val DATA_KEY_BUTTONS = "buttons"
 
 internal fun RemoteMessage.toPushMessage(): PushMessage {
+  val data = this.data
   return PushMessage(
     messageId,
     notification?.title,
     notification?.body,
-    data
+    data,
+    image = data[DATA_KEY_IMAGE],
+    buttons = parseButtons(data[DATA_KEY_BUTTONS])
   )
+}
+
+/** Parses the `buttons` data entry (a JSON array string) into button objects. */
+internal fun parseButtons(raw: String?): List<PushButton> {
+  if (raw.isNullOrBlank()) {
+    return emptyList()
+  }
+  val buttons = mutableListOf<PushButton>()
+  try {
+    val array = org.json.JSONArray(raw)
+    for (i in 0 until array.length()) {
+      val item = array.optJSONObject(i) ?: continue
+      val id = item.optString("id", "")
+      val title = item.optString("title", "")
+      if (id.isBlank() || title.isBlank()) {
+        continue
+      }
+      val extras = linkedMapOf<String, String>()
+      item.keys().forEach { key ->
+        if (key != "id" && key != "title") {
+          extras[key] = item.opt(key)?.toString() ?: ""
+        }
+      }
+      buttons += PushButton(id, title, extras)
+    }
+  } catch (_: Exception) {
+    return emptyList()
+  }
+  return buttons
 }

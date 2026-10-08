@@ -11,6 +11,7 @@ import {
   getCredentials,
   initialize,
   onMessage,
+  onNotificationAction,
   onNotificationPress,
   type PushCredentials,
   type PushMessage,
@@ -31,10 +32,14 @@ export default function App() {
     const unsubscribePress = onNotificationPress((message: PushMessage) => {
       append(`press: ${JSON.stringify(message)}`);
     });
+    const unsubscribeAction = onNotificationAction((message, button) => {
+      append(`action: ${JSON.stringify(button)} in ${JSON.stringify(message)}`);
+    });
 
     return () => {
       unsubscribeMessage();
       unsubscribePress();
+      unsubscribeAction();
     };
   }, []);
 

@@ -4,6 +4,8 @@ import { PushSignalError } from './PushSignalError';
 import type {
   AndroidFirebaseConfig,
   OnMessageListener,
+  OnNotificationActionListener,
+  PushButton,
   PushCredentials,
   PushDiagnostics,
   PushEnvironment,
@@ -14,6 +16,7 @@ import type {
 
 const messageListeners = new Set<OnMessageListener>();
 const pressListeners = new Set<(message: PushMessage) => void>();
+const actionListeners = new Set<OnNotificationActionListener>();
 let nativeCallbacksBound = false;
 
 /**
@@ -24,6 +27,7 @@ let nativeCallbacksBound = false;
  */
 const queuedMessages: PushMessage[] = [];
 const queuedPresses: PushMessage[] = [];
+const queuedActions: PushMessage[] = [];
 const MAX_QUEUED_EVENTS = 20;
 
 function enqueue(queue: PushMessage[], message: PushMessage): void {
@@ -56,6 +60,28 @@ function deliverPress(message: PushMessage): void {
   }
 }
 
+function deliverAction(message: PushMessage): void {
+  const button = findButton(message);
+  for (const listener of [...actionListeners]) {
+    try {
+      listener(message, button);
+    } catch {
+      // Ignore listener failures so one bad subscriber cannot break delivery.
+    }
+  }
+}
+
+function findButton(message: PushMessage): PushButton {
+  const id = message.action;
+  if (id != null && Array.isArray(message.buttons)) {
+    const found = message.buttons.find((button) => button.id === id);
+    if (found) {
+      return found;
+    }
+  }
+  return { id: id ?? '', title: '' };
+}
+
 function flushQueuedMessages(): void {
   if (queuedMessages.length === 0 || messageListeners.size === 0) {
     return;
@@ -72,11 +98,22 @@ function flushQueuedPresses(): void {
   queued.forEach(deliverPress);
 }
 
+function flushQueuedActions(): void {
+  if (queuedActions.length === 0 || actionListeners.size === 0) {
+    return;
+  }
+  const queued = queuedActions.splice(0, queuedActions.length);
+  queued.forEach(deliverAction);
+}
+
 function normalizeMessage(raw: {
   id?: string;
   title?: string;
   body?: string;
   data: Object;
+  image?: string;
+  buttons?: unknown;
+  action?: string;
 }): PushMessage {
   const data: Record<string, string> = {};
   if (raw.data && typeof raw.data === 'object') {
@@ -95,7 +132,28 @@ function normalizeMessage(raw: {
     title: raw.title,
     body: raw.body,
     data,
+    image: typeof raw.image === 'string' ? raw.image : undefined,
+    buttons: normalizeButtons(raw.buttons),
+    action: typeof raw.action === 'string' ? raw.action : undefined,
   };
+}
+
+function normalizeButtons(value: unknown): PushButton[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const buttons: PushButton[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== 'string' || typeof record.title !== 'string') {
+      continue;
+    }
+    buttons.push(record as unknown as PushButton);
+  }
+  return buttons.length > 0 ? buttons : undefined;
 }
 
 function normalizeCredentials(raw: {
@@ -178,6 +236,15 @@ function bindNativeCallbacks() {
     deliverPress(message);
   });
 
+  NativePushSignal.onNotificationAction((raw) => {
+    const message = normalizeMessage(raw);
+    if (actionListeners.size === 0) {
+      enqueue(queuedActions, message);
+      return;
+    }
+    deliverAction(message);
+  });
+
   NativePushSignal.startListening();
 }
 
@@ -221,6 +288,17 @@ export function onNotificationPress(
   flushQueuedPresses();
   return () => {
     pressListeners.delete(listener);
+  };
+}
+
+export function onNotificationAction(
+  listener: OnNotificationActionListener
+): () => void {
+  bindNativeCallbacks();
+  actionListeners.add(listener);
+  flushQueuedActions();
+  return () => {
+    actionListeners.delete(listener);
   };
 }
 

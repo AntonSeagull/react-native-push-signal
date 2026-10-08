@@ -1,11 +1,20 @@
 import type { CodegenTypes, TurboModule } from 'react-native';
 import { TurboModuleRegistry } from 'react-native';
 
+export type NativePushButton = {
+  id: string;
+  title: string;
+  [key: string]: unknown;
+};
+
 export type NativePushMessage = {
   id?: string;
   title?: string;
   body?: string;
   data: Object;
+  image?: string;
+  buttons?: NativePushButton[];
+  action?: string;
 };
 
 export type NativePushCredentials = {
@@ -39,6 +48,7 @@ export interface Spec extends TurboModule {
   startListening(): void;
   readonly onMessage: CodegenTypes.EventEmitter<NativePushMessage>;
   readonly onNotificationPress: CodegenTypes.EventEmitter<NativePushMessage>;
+  readonly onNotificationAction: CodegenTypes.EventEmitter<NativePushMessage>;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('PushSignal');

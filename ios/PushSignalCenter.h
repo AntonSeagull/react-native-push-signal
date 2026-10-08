@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)setOnMessage:(void (^)(NSDictionary *message))callback;
 - (void)setOnNotificationPress:(void (^)(NSDictionary *message))callback;
+- (void)setOnNotificationAction:(void (^)(NSDictionary *message))callback;
 
 - (void)handleDeviceToken:(NSData *)deviceToken;
 - (void)handleRegistrationError:(NSError *)error;

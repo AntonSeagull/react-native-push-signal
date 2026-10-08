@@ -7,14 +7,34 @@ export interface PushCredentials {
   environment?: PushEnvironment;
 }
 
+export interface PushButton {
+  /** Stable identifier the server puts in the payload, echoed back on tap. */
+  id: string;
+  /** Label shown on the button. */
+  title: string;
+  /** Any extra fields the server attached to the button (url, deep link, ...). */
+  [key: string]: unknown;
+}
+
 export interface PushMessage {
   id?: string;
   title?: string;
   body?: string;
   data: Record<string, string>;
+  /** URL of the image to show in the notification (needs `mutable-content` on iOS). */
+  image?: string;
+  /** Action buttons sent by the server. */
+  buttons?: PushButton[];
+  /** Id of the pressed button; set only on `onNotificationAction`. */
+  action?: string;
 }
 
 export type OnMessageListener = (message: PushMessage) => void | Promise<void>;
+
+export type OnNotificationActionListener = (
+  message: PushMessage,
+  button: PushButton
+) => void;
 
 export type PushProvider =
   | 'fcm'
