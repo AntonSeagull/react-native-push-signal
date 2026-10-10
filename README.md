@@ -10,6 +10,9 @@ Get device credentials for your server and listen for incoming notifications or 
 npm install react-native-push-signal
 ```
 
+> For an agent/developer: step-by-step native setup and verification — see
+> [AGENTS_INSTALL.md](AGENTS_INSTALL.md).
+
 ## Usage
 
 ```ts
@@ -290,6 +293,12 @@ iOS specifics:
 - Images and payload buttons only work with a connected Notification Service Extension (see [Images and buttons: Notification Service Extension](#images-and-buttons-notification-service-extension)).
 - iOS does not pass arbitrary payload through a button — the app only receives the pressed button's `id`. The library reconstructs the full button object from `message.buttons` by `id`, so JS receives the whole button, just like on Android.
 - A tap on the notification body (`UNNotificationDefaultActionIdentifier`) still goes to `onNotificationPress`, not `onNotificationAction`.
+
+Android specifics:
+
+- Buttons are drawn on the notification the plugin posts itself. In the foreground it posts for any displayable push; in the background it posts only for a data-only push that carries `buttons`, because the system notification built from an FCM `notification` payload cannot render action buttons. To get buttons in the background, send a data-only message (`priority: high`) with `title`, `body`, `image`, `buttons` in `data`.
+- A button tap opens or cold-starts the host app and is re-read from the launch intent, so `onNotificationAction` fires after initialization even when the app was killed — the tap is buffered until JS subscribes. The notification is dismissed on tap, just like a body tap.
+
 
 ## Web
 

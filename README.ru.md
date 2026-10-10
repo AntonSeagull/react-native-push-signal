@@ -10,6 +10,9 @@
 npm install react-native-push-signal
 ```
 
+> Агенту/разработчику: пошаговая настройка нативных проектов и проверка — в
+> [AGENTS_INSTALL.md](AGENTS_INSTALL.md).
+
 ## Использование
 
 ```ts
@@ -289,6 +292,11 @@ export interface PushMessage {
 - Кнопки и картинка из пейлоада работают **только** с подключённым Notification Service Extension (см. [Картинка и кнопки: Notification Service Extension](#картинка-и-кнопки-notification-service-extension)).
 - iOS не передаёт произвольный payload через кнопку — приложение получает лишь `id` нажатой кнопки. Библиотека восстанавливает полный объект кнопки из `message.buttons` по `id`, поэтому в JS вы получаете кнопку целиком, как на Android.
 - Нажатие по телу уведомления (`UNNotificationDefaultActionIdentifier`) по-прежнему идёт в `onNotificationPress`, а не в `onNotificationAction`.
+
+Особенности Android:
+
+- Кнопки рисуются на уведомлении, которое показывает сам плагин. В foreground он постит любое отображаемое уведомление; в фоне — только data-only пуш с `buttons`, потому что системное уведомление из FCM-пейлоада `notification` кнопок не несёт. Чтобы кнопки были в фоне, отправляйте data-only сообщение (`priority: high`) с ключами `title`, `body`, `image`, `buttons` в `data`.
+- Нажатие кнопки открывает или запускает приложение, а тап перечитывается из launch-intent, поэтому `onNotificationAction` срабатывает после инициализации, даже если приложение было убито — нажатие буферизуется до подписки JS. Уведомление при нажатии скрывается, как и при тапе по телу.
 
 ## Web
 

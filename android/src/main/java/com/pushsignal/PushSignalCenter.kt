@@ -43,6 +43,9 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private const val TOKEN_MAX_ATTEMPTS = 5
   private const val TOKEN_INITIAL_RETRY_DELAY_MS = 1_000L
   private const val TOKEN_MAX_RETRY_DELAY_MS = 8_000L
+  private const val PLAY_SERVICES_MAX_ATTEMPTS = 5
+  private const val PLAY_SERVICES_INITIAL_RETRY_DELAY_MS = 1_000L
+  private const val PLAY_SERVICES_MAX_RETRY_DELAY_MS = 8_000L
 
   private const val PROVIDER_FCM = "fcm"
   private const val PROVIDER_HMS = "hms"
@@ -69,6 +72,8 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private val pendingActions = ArrayDeque<PushMessage>()
   private var lastPressKey: String? = null
   private var lastPressAt = 0L
+  private var lastActionKey: String? = null
+  private var lastActionAt = 0L
   private val pendingMessages = CopyOnWriteArrayList<PushMessage>()
   private var lastMessageKey: String? = null
   private var lastMessageAt = 0L
@@ -265,16 +270,41 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   }
 
   /**
-   * Fails fast with an actionable message when Google Play services cannot serve FCM
-   * (for example a China-only ROM without GMS). The message names the provider the
-   * device should use instead, so the cause is obvious in React Native logs.
+   * Waits for Google Play services to become ready, then fails with an actionable
+   * message only when they truly cannot serve FCM (for example a China-only ROM
+   * without GMS). On slow or older devices `isGooglePlayServicesAvailable` can
+   * transiently report Play services as missing/updating right after a cold start,
+   * so transient statuses are retried with backoff instead of failing fast. The
+   * message names the provider the device should use instead, so the cause is
+   * obvious in React Native logs.
    */
   private fun ensurePlayServices(context: Context) {
-    val status = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context)
-    if (status == ConnectionResult.SUCCESS) {
-      return
+    var delayMs = PLAY_SERVICES_INITIAL_RETRY_DELAY_MS
+    var lastStatus = ConnectionResult.SUCCESS
+
+    for (attempt in 1..PLAY_SERVICES_MAX_ATTEMPTS) {
+      val status = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context)
+      if (status == ConnectionResult.SUCCESS) {
+        return
+      }
+      lastStatus = status
+      if (attempt == PLAY_SERVICES_MAX_ATTEMPTS || !isTransientPlayServicesStatus(status)) {
+        break
+      }
+      Log.w(
+        TAG,
+        "Play services not ready (code $status), attempt $attempt/$PLAY_SERVICES_MAX_ATTEMPTS. Retrying in ${delayMs}ms"
+      )
+      try {
+        Thread.sleep(delayMs)
+      } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        break
+      }
+      delayMs = (delayMs * 2).coerceAtMost(PLAY_SERVICES_MAX_RETRY_DELAY_MS)
     }
 
+    val status = lastStatus
     val code = when (status) {
       ConnectionResult.SERVICE_MISSING -> "E_GMS_MISSING"
       ConnectionResult.SERVICE_VERSION_UPDATE_REQUIRED -> "E_GMS_UPDATE_REQUIRED"
@@ -301,6 +331,17 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     Log.w(TAG, "Play services check failed ($code): $message")
     PushSignalDevLog.add(DevLogLevel.ERROR, "provider", "Google Play services недоступны", "$code · $message")
     throw PushSignalException(code, message)
+  }
+
+  /**
+   * Statuses that commonly clear on their own shortly after a cold start or a Play
+   * services update. `SERVICE_DISABLED` and `SERVICE_INVALID` need a user action, so
+   * they are not retried and fail immediately.
+   */
+  private fun isTransientPlayServicesStatus(status: Int): Boolean {
+    return status == ConnectionResult.SERVICE_UPDATING ||
+      status == ConnectionResult.SERVICE_VERSION_UPDATE_REQUIRED ||
+      status == ConnectionResult.SERVICE_MISSING
   }
 
   /**
@@ -480,8 +521,19 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       PushSignalDevLog.add(DevLogLevel.WARN, "push", "Пуш подавлен (дубликат)", message.id)
       return
     }
-    val where = if (startedActivityCount > 0 || currentActivity != null) "foreground" else "background"
+    val inForeground = startedActivityCount > 0 || currentActivity != null
+    val where = if (inForeground) "foreground" else "background"
     PushSignalDevLog.add(DevLogLevel.SUCCESS, "push", "Пуш получен ($where)", describe(message))
+
+    // In the foreground we always draw the tray notification for displayable
+    // pushes. In the background FCM itself renders `notification` payloads, but a
+    // data-only push that carries action buttons is invisible to the system, so
+    // the library posts it (with its buttons) instead.
+    val shouldPost = message.isDisplayable() &&
+      (inForeground || message.buttons.isNotEmpty())
+    if (shouldPost) {
+      runOnMain { postNotification(message) }
+    }
     runOnMain { deliverMessage(message) }
   }
 
@@ -497,14 +549,6 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     } catch (_: Throwable) {
       // Ignore listener failures.
     }
-
-    val inForeground = startedActivityCount > 0 || currentActivity != null
-    if (
-      inForeground &&
-      (!message.title.isNullOrEmpty() || !message.body.isNullOrEmpty())
-    ) {
-      postForegroundNotification(message)
-    }
   }
 
   private fun runOnMain(block: () -> Unit) {
@@ -515,7 +559,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     }
   }
 
-  private fun postForegroundNotification(message: PushMessage) {
+  private fun postNotification(message: PushMessage) {
     val context = application ?: return
     val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
       ?: return
@@ -544,7 +588,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       launchIntent.putExtra(key, value)
     }
 
-    val requestCode = (message.id ?: message.title ?: "push").hashCode()
+    val requestCode = notificationId(message)
     val pendingIntent = PendingIntent.getActivity(
       context,
       requestCode,
@@ -563,13 +607,15 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       .setNumber(1)
 
     message.buttons.forEachIndexed { index, button ->
-      builder.addAction(0, button.title, actionPendingIntent(context, message, button, index))
+      actionPendingIntent(context, message, button, index)?.let { pendingIntent ->
+        builder.addAction(0, button.title, pendingIntent)
+      }
     }
 
     val imageUrl = message.image?.takeIf { it.isNotBlank() }
     if (imageUrl == null) {
       manager.notify(requestCode, builder.build())
-      logForegroundPosted(message)
+      logNotificationPosted(message)
       return
     }
 
@@ -580,39 +626,49 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
         builder.setStyle(NotificationCompat.BigPictureStyle().bigPicture(bitmap))
       }
       manager.notify(requestCode, builder.build())
-      logForegroundPosted(message)
+      logNotificationPosted(message)
     }
   }
 
-  private fun logForegroundPosted(message: PushMessage) {
+  private fun logNotificationPosted(message: PushMessage) {
     PushSignalDevLog.add(
       DevLogLevel.INFO,
       "push",
-      "Показано foreground-уведомление",
+      "Показано уведомление",
       message.title ?: message.body
     )
   }
 
+  /**
+   * Builds the [PendingIntent] for a notification action button. Uses
+   * [PendingIntent.getActivity] so a tap reopens (or cold-starts) the host app
+   * instead of only waking a short-lived broadcast receiver: the extras are then
+   * preserved by the system and re-read through [handleIntent], which lets the
+   * tap survive process death until JS subscribes. Returns null when the host
+   * app has no launcher activity to open.
+   */
   private fun actionPendingIntent(
     context: Context,
     message: PushMessage,
     button: PushButton,
     index: Int
-  ): PendingIntent {
-    val intent = Intent(context, PushSignalActionReceiver::class.java)
-    intent.putExtra(EXTRA_ACTION_KEY, true)
-    intent.putExtra(EXTRA_ACTION_ID, button.id)
-    intent.putExtra("google.message_id", message.id ?: UUID.randomUUID().toString())
-    message.title?.let { intent.putExtra("gcm.notification.title", it) }
-    message.body?.let { intent.putExtra("gcm.notification.body", it) }
+  ): PendingIntent? {
+    val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+      ?: return null
+    launchIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    launchIntent.putExtra(EXTRA_ACTION_KEY, true)
+    launchIntent.putExtra(EXTRA_ACTION_ID, button.id)
+    launchIntent.putExtra("google.message_id", message.id ?: UUID.randomUUID().toString())
+    message.title?.let { launchIntent.putExtra("gcm.notification.title", it) }
+    message.body?.let { launchIntent.putExtra("gcm.notification.body", it) }
     message.data.forEach { (key, value) ->
-      intent.putExtra(key, value)
+      launchIntent.putExtra(key, value)
     }
     val requestCode = ((message.id ?: message.title ?: "push") + "#" + button.id + "#" + index).hashCode()
-    return PendingIntent.getBroadcast(
+    return PendingIntent.getActivity(
       context,
       requestCode,
-      intent,
+      launchIntent,
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
   }
@@ -646,19 +702,22 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     }.start()
   }
 
-  /**
-   * Handles a button tap delivered through [PushSignalActionReceiver]. Rebuilds
-   * the full message, marks the pressed button id and forwards it to JS.
-   */
-  fun handleAction(intent: Intent?) {
-    if (intent == null || !intent.getBooleanExtra(EXTRA_ACTION_KEY, false)) {
+  private fun emitAction(message: PushMessage) {
+    if (!markActionDelivered(message)) {
+      Log.d(TAG, "[action] emitAction: dropped duplicate id=${message.id}, action=${message.action}")
+      PushSignalDevLog.add(DevLogLevel.WARN, "action", "Кнопка подавлена (дубликат)", message.action)
       return
     }
-    val actionId = intent.getStringExtra(EXTRA_ACTION_ID) ?: return
-    val message = intent.toPushMessage().copy(action = actionId)
-    PushSignalDevLog.add(DevLogLevel.SUCCESS, "action", "Нажата кнопка уведомления", actionId)
+    // Buttons do not auto-cancel the notification, so dismiss it here the same
+    // way a tap on the body does. Do it before buffering so the tray clears even
+    // if JS is not ready yet.
+    cancelNotification(message)
+    PushSignalDevLog.add(DevLogLevel.SUCCESS, "action", "Нажата кнопка уведомления", message.action)
     val listener = onNotificationAction
-    Log.d(TAG, "[action] handleAction: id=$actionId, listenerBound=${listener != null}, ready=$ready")
+    Log.d(
+      TAG,
+      "[action] emitAction: id=${message.id}, action=${message.action}, listenerBound=${listener != null}, ready=$ready"
+    )
     if (listener != null && ready) {
       listener(message)
     } else {
@@ -681,6 +740,23 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       return appIcon
     }
     return android.R.drawable.stat_notify_more
+  }
+
+  /**
+   * Stable notification id for a message. Used both when posting the
+   * notification and when cancelling it after a button tap, so the two always
+   * refer to the same entry.
+   */
+  private fun notificationId(message: PushMessage): Int {
+    return (message.id ?: message.title ?: "push").hashCode()
+  }
+
+  /** Dismisses the posted notification after a button tap. */
+  private fun cancelNotification(message: PushMessage) {
+    val context = application ?: return
+    val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+      ?: return
+    manager.cancel(notificationId(message))
   }
 
   override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
@@ -754,6 +830,16 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     }
 
     intent.putExtra(EXTRA_HANDLED, true)
+
+    if (intent.getBooleanExtra(EXTRA_ACTION_KEY, false)) {
+      val actionId = intent.getStringExtra(EXTRA_ACTION_ID)
+      if (actionId != null) {
+        Log.d(TAG, "[action] handleIntent: emitting action id=$actionId")
+        emitAction(intent.toPushMessage().copy(action = actionId))
+        return
+      }
+    }
+
     Log.d(TAG, "[tap] handleIntent: emitting press")
     emitPress(intent.toPushMessage())
   }
@@ -858,6 +944,25 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   }
 
   /**
+   * Same idea as [markPressDelivered], but a single notification can carry
+   * several buttons, so the pressed button id is part of the key. Collapses the
+   * same button tap seen through several Android entry points.
+   */
+  private fun markActionDelivered(message: PushMessage): Boolean {
+    val messageKey = message.id ?: "${message.title.orEmpty()}|${message.body.orEmpty()}"
+    val key = "$messageKey|${message.action.orEmpty()}"
+    val now = System.currentTimeMillis()
+    synchronized(lock) {
+      if (lastActionKey == key && now - lastActionAt < PRESS_DEDUPE_MS) {
+        return false
+      }
+      lastActionKey = key
+      lastActionAt = now
+    }
+    return true
+  }
+
+  /**
    * FCM delivers at least once, so the same [RemoteMessage] can reach
    * `onMessageReceived` more than once. Collapse duplicates within a short
    * window so subscribers receive exactly one `onMessage` per notification.
@@ -899,6 +1004,7 @@ private fun Application.currentActivityOrNull(): Activity? {
 private fun Intent.isPushTap(): Boolean {
   val extras = extras ?: return false
   return extras.getBoolean(EXTRA_PRESS_KEY, false) ||
+    extras.getBoolean(EXTRA_ACTION_KEY, false) ||
     extras.containsKey("google.message_id") ||
     extras.containsKey("google.sent_time") ||
     extras.containsKey("gcm.n.e") ||
@@ -970,12 +1076,21 @@ internal fun RemoteMessage.toPushMessage(): PushMessage {
   val data = this.data
   return PushMessage(
     messageId,
-    notification?.title,
-    notification?.body,
+    notification?.title ?: data["title"]?.takeIf { it.isNotBlank() },
+    notification?.body ?: data["body"]?.takeIf { it.isNotBlank() },
     data,
-    image = data[DATA_KEY_IMAGE],
+    image = data[DATA_KEY_IMAGE]?.takeIf { it.isNotBlank() },
     buttons = parseButtons(data[DATA_KEY_BUTTONS])
   )
+}
+
+/**
+ * A push is displayable when it carries a title, a body or action buttons. Used
+ * to decide whether the library must draw a background notification for a
+ * data-only push (FCM cannot render buttons in a `notification` payload).
+ */
+internal fun PushMessage.isDisplayable(): Boolean {
+  return !title.isNullOrEmpty() || !body.isNullOrEmpty() || buttons.isNotEmpty()
 }
 
 /** Parses the `buttons` data entry (a JSON array string) into button objects. */
