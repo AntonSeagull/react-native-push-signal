@@ -245,3 +245,89 @@ describe('pushSignal', () => {
     expect(mockNative.startListening).toHaveBeenCalled();
   });
 });
+
+describe('pushSignal without a usable native module', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  it('does not throw on import when the native module is missing', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    let api: typeof import('../pushSignal.native') | undefined;
+    jest.isolateModules(() => {
+      jest.doMock('../NativePushSignal', () => ({
+        __esModule: true,
+        default: null,
+      }));
+      api = require('../pushSignal.native');
+    });
+
+    expect(api).toBeDefined();
+    const unsubscribe = api!.onMessage(() => undefined);
+    expect(typeof unsubscribe).toBe('function');
+    unsubscribe();
+    api!.onNotificationPress(() => undefined)();
+    api!.onNotificationAction(() => undefined)();
+
+    await expect(api!.initialize()).rejects.toMatchObject({
+      code: 'E_NOT_LINKED',
+    });
+    await expect(api!.getCredentials()).rejects.toMatchObject({
+      code: 'E_NOT_LINKED',
+    });
+    await expect(api!.getDiagnostics()).rejects.toMatchObject({
+      code: 'E_NOT_LINKED',
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('does not throw on import when native event emitters are missing', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const startListening = jest.fn();
+    let api: typeof import('../pushSignal.native') | undefined;
+    jest.isolateModules(() => {
+      jest.doMock('../NativePushSignal', () => ({
+        __esModule: true,
+        default: {
+          initialize: jest.fn(async () => undefined),
+          getCredentials: jest.fn(),
+          getDiagnostics: jest.fn(),
+          startListening,
+        },
+      }));
+      api = require('../pushSignal.native');
+    });
+
+    expect(() => api!.onMessage(() => undefined)).not.toThrow();
+    expect(startListening).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('survives a native module whose binding throws', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    let api: typeof import('../pushSignal.native') | undefined;
+    expect(() =>
+      jest.isolateModules(() => {
+        jest.doMock('../NativePushSignal', () => ({
+          __esModule: true,
+          default: {
+            initialize: jest.fn(),
+            getCredentials: jest.fn(),
+            getDiagnostics: jest.fn(),
+            startListening: jest.fn(() => {
+              throw new Error('emitter is null');
+            }),
+            onMessage: jest.fn(),
+            onNotificationPress: jest.fn(),
+            onNotificationAction: jest.fn(),
+          },
+        }));
+        api = require('../pushSignal.native');
+      })
+    ).not.toThrow();
+    expect(api).toBeDefined();
+    warn.mockRestore();
+  });
+});

@@ -18,6 +18,32 @@ const messageListeners = new Set<OnMessageListener>();
 const pressListeners = new Set<(message: PushMessage) => void>();
 const actionListeners = new Set<OnNotificationActionListener>();
 let nativeCallbacksBound = false;
+let warnedUnavailable = false;
+
+/**
+ * The library must never crash the host app (see AGENTS.md). When the native
+ * module is missing or incomplete (not rebuilt, old architecture without event
+ * emitters, Expo Go), every API degrades to a no-op or a rejected promise
+ * instead of throwing during import or render.
+ */
+function warnUnavailable(reason: string): void {
+  if (warnedUnavailable) {
+    return;
+  }
+  warnedUnavailable = true;
+  try {
+    console.warn(`[PushSignal] ${reason}. Push notifications are disabled.`);
+  } catch {
+    // Logging must never throw.
+  }
+}
+
+function unavailableError(): PushSignalError {
+  return new PushSignalError(
+    'E_NOT_LINKED',
+    'PushSignal native module is not available. Rebuild the native app after installing react-native-push-signal (the new architecture is required).'
+  );
+}
 
 /**
  * Messages and taps can arrive before the host app subscribes (the native side
@@ -106,15 +132,23 @@ function flushQueuedActions(): void {
   queued.forEach(deliverAction);
 }
 
-function normalizeMessage(raw: {
-  id?: string;
-  title?: string;
-  body?: string;
-  data: Object;
-  image?: string;
-  buttons?: unknown;
-  action?: string;
-}): PushMessage {
+function normalizeMessage(
+  raw:
+    | {
+        id?: string;
+        title?: string;
+        body?: string;
+        data: Object;
+        image?: string;
+        buttons?: unknown;
+        action?: string;
+      }
+    | null
+    | undefined
+): PushMessage {
+  if (!raw || typeof raw !== 'object') {
+    return { data: {} };
+  }
   const data: Record<string, string> = {};
   if (raw.data && typeof raw.data === 'object') {
     for (const [key, value] of Object.entries(
@@ -198,6 +232,9 @@ function toPushSignalError(
  * collect them must never hide the original, already actionable error.
  */
 async function enrichError(error: PushSignalError): Promise<PushSignalError> {
+  if (!NativePushSignal) {
+    return error;
+  }
   try {
     const diagnostics = normalizeDiagnostics(
       await NativePushSignal.getDiagnostics()
@@ -216,41 +253,81 @@ function bindNativeCallbacks() {
     return;
   }
 
+  const native = NativePushSignal;
+  if (!native) {
+    warnUnavailable('Native module "PushSignal" is not linked');
+    return;
+  }
+  if (
+    typeof native.onMessage !== 'function' ||
+    typeof native.onNotificationPress !== 'function' ||
+    typeof native.onNotificationAction !== 'function' ||
+    typeof native.startListening !== 'function'
+  ) {
+    warnUnavailable(
+      'Native event emitters are missing (the new architecture is required)'
+    );
+    return;
+  }
+
   nativeCallbacksBound = true;
 
-  NativePushSignal.onMessage((raw) => {
-    const message = normalizeMessage(raw);
-    if (messageListeners.size === 0) {
-      enqueue(queuedMessages, message);
-      return;
-    }
-    deliverMessage(message);
-  });
+  try {
+    native.onMessage((raw) => {
+      try {
+        const message = normalizeMessage(raw);
+        if (messageListeners.size === 0) {
+          enqueue(queuedMessages, message);
+          return;
+        }
+        deliverMessage(message);
+      } catch {
+        // Never let a malformed event escape into the native event loop.
+      }
+    });
 
-  NativePushSignal.onNotificationPress((raw) => {
-    const message = normalizeMessage(raw);
-    if (pressListeners.size === 0) {
-      enqueue(queuedPresses, message);
-      return;
-    }
-    deliverPress(message);
-  });
+    native.onNotificationPress((raw) => {
+      try {
+        const message = normalizeMessage(raw);
+        if (pressListeners.size === 0) {
+          enqueue(queuedPresses, message);
+          return;
+        }
+        deliverPress(message);
+      } catch {
+        // Never let a malformed event escape into the native event loop.
+      }
+    });
 
-  NativePushSignal.onNotificationAction((raw) => {
-    const message = normalizeMessage(raw);
-    if (actionListeners.size === 0) {
-      enqueue(queuedActions, message);
-      return;
-    }
-    deliverAction(message);
-  });
+    native.onNotificationAction((raw) => {
+      try {
+        const message = normalizeMessage(raw);
+        if (actionListeners.size === 0) {
+          enqueue(queuedActions, message);
+          return;
+        }
+        deliverAction(message);
+      } catch {
+        // Never let a malformed event escape into the native event loop.
+      }
+    });
 
-  NativePushSignal.startListening();
+    native.startListening();
+  } catch (error) {
+    warnUnavailable(
+      `Failed to bind native callbacks: ${String(
+        (error as { message?: string } | undefined)?.message ?? error
+      )}`
+    );
+  }
 }
 
 export async function initialize(
   config: AndroidFirebaseConfig = {}
 ): Promise<void> {
+  if (!NativePushSignal) {
+    throw unavailableError();
+  }
   try {
     await NativePushSignal.initialize(config);
   } catch (error) {
@@ -259,6 +336,9 @@ export async function initialize(
 }
 
 export async function getCredentials(): Promise<PushCredentials> {
+  if (!NativePushSignal) {
+    throw unavailableError();
+  }
   try {
     const raw = await NativePushSignal.getCredentials();
     return normalizeCredentials(raw);
@@ -268,7 +348,14 @@ export async function getCredentials(): Promise<PushCredentials> {
 }
 
 export async function getDiagnostics(): Promise<PushDiagnostics> {
-  return normalizeDiagnostics(await NativePushSignal.getDiagnostics());
+  if (!NativePushSignal) {
+    throw unavailableError();
+  }
+  try {
+    return normalizeDiagnostics(await NativePushSignal.getDiagnostics());
+  } catch (error) {
+    throw toPushSignalError(error, 'E_DIAGNOSTICS');
+  }
 }
 
 export function onMessage(listener: OnMessageListener): () => void {
@@ -302,4 +389,6 @@ export function onNotificationAction(
   };
 }
 
+// Bound eagerly so taps that cold-started the app are flushed into the JS queue
+// early. bindNativeCallbacks never throws, so importing the package is safe.
 bindNativeCallbacks();

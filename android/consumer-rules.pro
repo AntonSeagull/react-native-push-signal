@@ -2,3 +2,4 @@
 -keep class com.pushsignal.PushSignalInitProvider { *; }
 -keep class com.pushsignal.PushSignalCenter { *; }
 -keep class com.google.firebase.messaging.** { *; }
+-keep class com.pushsignal.** { *; }

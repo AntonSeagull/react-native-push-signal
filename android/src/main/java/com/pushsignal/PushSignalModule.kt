@@ -24,17 +24,30 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
    */
   private val activityEventListener = object : BaseActivityEventListener() {
     override fun onNewIntent(intent: Intent) {
-      Log.d("PushSignal", "[tap] ActivityEventListener.onNewIntent: action=${intent.action}")
-      PushSignalCenter.handleNewIntent(reactApplicationContext.currentActivity, intent)
+      guard("Module.onNewIntent") {
+        Log.d("PushSignal", "[tap] ActivityEventListener.onNewIntent: action=${intent.action}")
+        PushSignalCenter.handleNewIntent(reactApplicationContext.currentActivity, intent)
+      }
     }
   }
 
   init {
-    reactApplicationContext.addActivityEventListener(activityEventListener)
-    Log.d("PushSignal", "[tap] ActivityEventListener registered on ReactContext")
+    guard("Module.init") {
+      reactApplicationContext.addActivityEventListener(activityEventListener)
+      Log.d("PushSignal", "[tap] ActivityEventListener registered on ReactContext")
+    }
   }
 
   override fun initialize(config: ReadableMap, promise: Promise) {
+    try {
+      initializeUnsafe(config, promise)
+    } catch (error: Throwable) {
+      reportGuarded("Module.initialize", error)
+      rejectSafely(promise, "E_INIT", error)
+    }
+  }
+
+  private fun initializeUnsafe(config: ReadableMap, promise: Promise) {
     val firebaseConfig = AndroidFirebaseConfig(
       project_id = config.getStringOrNull("project_id"),
       mobilesdk_app_id = config.getStringOrNull("mobilesdk_app_id"),
@@ -49,10 +62,10 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
     PushSignalCenter.setDevPanel(devPanel)
     PushSignalCenter.initialize(firebaseConfig) { error ->
       if (error == null) {
-        promise.resolve(null)
+        guard("Module.initialize.resolve") { promise.resolve(null) }
       } else {
         val code = (error as? PushSignalException)?.code ?: "E_INIT"
-        promise.reject(code, error.message, error)
+        rejectSafely(promise, code, error)
       }
     }
   }
@@ -66,9 +79,11 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
           putString("token", token)
         }
         promise.resolve(result)
-      } catch (error: Exception) {
+      } catch (error: Throwable) {
+        // Throwable, not Exception: a NoClassDefFoundError on this worker thread
+        // would otherwise kill the whole process.
         val code = (error as? PushSignalException)?.code ?: "E_CREDENTIALS"
-        promise.reject(code, error.message, error)
+        rejectSafely(promise, code, error)
       }
     }
   }
@@ -78,8 +93,8 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
       try {
         PushSignalCenter.attach(reactApplicationContext)
         promise.resolve(PushSignalCenter.diagnose(reactApplicationContext).toWritableMap())
-      } catch (error: Exception) {
-        promise.reject("E_DIAGNOSTICS", error.message, error)
+      } catch (error: Throwable) {
+        rejectSafely(promise, "E_DIAGNOSTICS", error)
       }
     }
   }
@@ -91,23 +106,45 @@ class PushSignalModule(reactContext: ReactApplicationContext) :
     listening = true
     Log.d("PushSignal", "[tap] startListening: binding native callbacks")
 
-    PushSignalCenter.setOnMessage { message ->
-      emitOnMessage(message.toWritableMap())
-    }
-    PushSignalCenter.setOnNotificationPress { message ->
-      Log.d("PushSignal", "[tap] emitOnNotificationPress -> JS: id=${message.id}")
-      emitOnNotificationPress(message.toWritableMap())
-    }
-    PushSignalCenter.setOnNotificationAction { message ->
-      Log.d("PushSignal", "[action] emitOnNotificationAction -> JS: action=${message.action}")
-      emitOnNotificationAction(message.toWritableMap())
+    // `emitOn...` dereferences the codegen event emitter, which is null on the
+    // old architecture and after the JS runtime is torn down. Each emit is
+    // guarded so a missing emitter drops the event instead of crashing.
+    guard("Module.startListening") {
+      PushSignalCenter.setOnMessage { message ->
+        guard("Module.emitOnMessage") {
+          emitOnMessage(message.toWritableMap())
+        }
+      }
+      PushSignalCenter.setOnNotificationPress { message ->
+        guard("Module.emitOnNotificationPress") {
+          Log.d("PushSignal", "[tap] emitOnNotificationPress -> JS: id=${message.id}")
+          emitOnNotificationPress(message.toWritableMap())
+        }
+      }
+      PushSignalCenter.setOnNotificationAction { message ->
+        guard("Module.emitOnNotificationAction") {
+          Log.d("PushSignal", "[action] emitOnNotificationAction -> JS: action=${message.action}")
+          emitOnNotificationAction(message.toWritableMap())
+        }
+      }
     }
   }
 
   override fun invalidate() {
-    reactApplicationContext.removeActivityEventListener(activityEventListener)
-    PushSignalCenter.setDevPanel(false)
+    guard("Module.invalidate") {
+      reactApplicationContext.removeActivityEventListener(activityEventListener)
+      // Drop callbacks bound to this (now dead) JS runtime; events are buffered
+      // again until the next runtime calls startListening.
+      PushSignalCenter.clearListeners()
+      PushSignalCenter.setDevPanel(false)
+    }
     super.invalidate()
+  }
+
+  private fun rejectSafely(promise: Promise, code: String, error: Throwable) {
+    guard("Module.reject") {
+      promise.reject(code, error.message ?: error.javaClass.simpleName, error)
+    }
   }
 
   companion object {

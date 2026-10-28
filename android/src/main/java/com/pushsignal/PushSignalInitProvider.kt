@@ -7,7 +7,11 @@ import android.net.Uri
 
 class PushSignalInitProvider : ContentProvider() {
   override fun onCreate(): Boolean {
-    context?.let(PushSignalCenter::attach)
+    // Runs before Application.onCreate in every host app: any throw here kills
+    // the app on launch, so it is fully guarded.
+    guard("InitProvider.onCreate") {
+      context?.let(PushSignalCenter::attach)
+    }
     return true
   }
 

@@ -51,4 +51,9 @@ export interface Spec extends TurboModule {
   readonly onNotificationAction: CodegenTypes.EventEmitter<NativePushMessage>;
 }
 
-export default TurboModuleRegistry.getEnforcing<Spec>('PushSignal');
+/**
+ * `get`, not `getEnforcing`: a missing native module (not rebuilt, old
+ * architecture, Expo Go) must not throw at import time and crash the host app.
+ * The wrapper checks for null and degrades to a no-op instead.
+ */
+export default TurboModuleRegistry.get<Spec>('PushSignal');

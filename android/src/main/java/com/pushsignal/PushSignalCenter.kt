@@ -46,6 +46,8 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   private const val PLAY_SERVICES_MAX_ATTEMPTS = 5
   private const val PLAY_SERVICES_INITIAL_RETRY_DELAY_MS = 1_000L
   private const val PLAY_SERVICES_MAX_RETRY_DELAY_MS = 8_000L
+  /** Reported by [diagnose] when the Play services API itself could not be queried. */
+  private const val PLAY_SERVICES_STATUS_UNKNOWN = -1
 
   private const val PROVIDER_FCM = "fcm"
   private const val PROVIDER_HMS = "hms"
@@ -82,7 +84,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   @Volatile private var pendingFirebaseConfig: AndroidFirebaseConfig? = null
   private val initializeWaiters = CopyOnWriteArrayList<(Exception?) -> Unit>()
 
-  fun attach(context: Context) {
+  fun attach(context: Context) = guard("attach") {
     val app = context.applicationContext as? Application ?: return
     if (application === app) {
       return
@@ -168,6 +170,17 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   }
 
   /**
+   * Unbinds the JS callbacks when the React runtime is torn down (reload,
+   * invalidate). Calling into a dead runtime can crash, so events are buffered
+   * until the next runtime calls `startListening`.
+   */
+  fun clearListeners() {
+    onMessage = null
+    onNotificationPress = null
+    onNotificationAction = null
+  }
+
+  /**
    * Buffered taps/messages are only delivered once the push module is ready
    * (Firebase applied or already present). This removes the cold-start race
    * where a tap fires before initialization completes on slow devices.
@@ -188,7 +201,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
    * and never calls `initialize`), mark the module ready as soon as JS binds its
    * listeners so buffered events are not held back indefinitely.
    */
-  private fun ensureReadyIfFirebaseInitialized() {
+  private fun ensureReadyIfFirebaseInitialized() = guard("ensureReadyIfFirebaseInitialized") {
     if (ready) {
       return
     }
@@ -221,7 +234,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       queued
     }
     Log.d(TAG, "[tap] flushPendingPressesIfReady: flushing ${pending.size} pending press(es)")
-    pending.forEach(callback)
+    pending.forEach { message -> guard("flushPendingPresses") { callback(message) } }
   }
 
   private fun flushPendingActionsIfReady() {
@@ -235,7 +248,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       queued
     }
     Log.d(TAG, "[action] flushPendingActionsIfReady: flushing ${pending.size} pending action(s)")
-    pending.forEach(callback)
+    pending.forEach { message -> guard("flushPendingActions") { callback(message) } }
   }
 
   fun fetchToken(): String {
@@ -349,10 +362,15 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
    * `getDiagnostics` API and to enrich errors with a concrete replacement service.
    */
   fun diagnose(context: Context): PushDiagnostics {
-    val status = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context)
+    // Diagnostics enrich other errors, so they must never throw themselves.
+    val status = guard("diagnose.playServicesStatus", PLAY_SERVICES_STATUS_UNKNOWN) {
+      GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context)
+    }
     val gmsAvailable = status == ConnectionResult.SUCCESS
-    val provider = resolveProvider(context, gmsAvailable)
-    val hint = providerHint(provider, gmsAvailable)
+    val provider = guard("diagnose.resolveProvider", ProviderInfo(PROVIDER_UNKNOWN, "unknown", null)) {
+      resolveProvider(context, gmsAvailable)
+    }
+    val hint = guard("diagnose.providerHint", null) { providerHint(provider, gmsAvailable) }
 
     return PushDiagnostics(
       platform = "android_os",
@@ -551,11 +569,16 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     }
   }
 
+  /**
+   * Everything posted to the main thread is guarded: an exception thrown from a
+   * Handler callback is uncaught and kills the host app.
+   */
   private fun runOnMain(block: () -> Unit) {
+    val safe = { guard("runOnMain", block) }
     if (Looper.myLooper() == Looper.getMainLooper()) {
-      block()
+      safe()
     } else {
-      mainHandler.post(block)
+      mainHandler.post(safe)
     }
   }
 
@@ -719,7 +742,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       "[action] emitAction: id=${message.id}, action=${message.action}, listenerBound=${listener != null}, ready=$ready"
     )
     if (listener != null && ready) {
-      listener(message)
+      guard("emitAction.listener") { listener(message) }
     } else {
       synchronized(lock) {
         pendingActions.addLast(message)
@@ -752,42 +775,44 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   }
 
   /** Dismisses the posted notification after a button tap. */
-  private fun cancelNotification(message: PushMessage) {
+  private fun cancelNotification(message: PushMessage) = guard("cancelNotification") {
     val context = application ?: return
     val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
       ?: return
     manager.cancel(notificationId(message))
   }
 
-  override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+  // Lifecycle callbacks fire for every Activity of the host app (including
+  // third-party ones), so each one is guarded.
+
+  override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = guard("onActivityCreated") {
     currentActivity = activity
     registerActivity(activity)
-    if (PushSignalDevPanel.isEnabled()) {
-      PushSignalDevPanel.attach(activity)
-    }
+    // The dev panel is attached in onActivityResumed only: touching the content
+    // view here (before setContentView) makes a later requestFeature() throw.
     handleIntent(activity.intent)
   }
 
-  override fun onActivityStarted(activity: Activity) {
+  override fun onActivityStarted(activity: Activity) = guard("onActivityStarted") {
     currentActivity = activity
     startedActivityCount += 1
   }
 
-  override fun onActivityResumed(activity: Activity) {
+  override fun onActivityResumed(activity: Activity) = guard("onActivityResumed") {
     currentActivity = activity
     if (PushSignalDevPanel.isEnabled()) {
-      PushSignalDevPanel.attach(activity)
+      guard("devPanel.attach") { PushSignalDevPanel.attach(activity) }
     }
     handleIntent(activity.intent)
   }
 
-  override fun onActivityPaused(activity: Activity) {
+  override fun onActivityPaused(activity: Activity) = guard("onActivityPaused") {
     if (currentActivity === activity) {
       currentActivity = null
     }
   }
 
-  override fun onActivityStopped(activity: Activity) {
+  override fun onActivityStopped(activity: Activity) = guard("onActivityStopped") {
     startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
     if (currentActivity === activity) {
       currentActivity = null
@@ -796,7 +821,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
   override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 
-  override fun onActivityDestroyed(activity: Activity) {
+  override fun onActivityDestroyed(activity: Activity) = guard("onActivityDestroyed") {
     if (currentActivity === activity) {
       currentActivity = null
     }
@@ -810,11 +835,16 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
 
     val componentActivity = activity as? ComponentActivity ?: return
     componentActivity.addOnNewIntentListener { intent ->
-      handleIntent(intent)
+      guard("onNewIntentListener") { handleIntent(intent) }
     }
   }
 
-  private fun handleIntent(intent: Intent?) {
+  /**
+   * Reading extras unparcels them, which throws `BadParcelableException` when an
+   * Activity of the host (or another SDK) carries a custom Parcelable. That is
+   * not ours to fail on, so the whole method is guarded.
+   */
+  private fun handleIntent(intent: Intent?) = guard("handleIntent") {
     if (intent == null) {
       Log.d(TAG, "[tap] handleIntent: null intent")
       return
@@ -869,17 +899,17 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
   }
 
   private fun applyFirebaseConfig(context: Context, config: AndroidFirebaseConfig): Exception? {
-    if (FirebaseApp.getApps(context).isNotEmpty()) {
-      FirebaseMessaging.getInstance().isAutoInitEnabled = true
-      PushSignalDevLog.add(DevLogLevel.SUCCESS, "init", "Firebase уже инициализирован")
-      return null
-    }
-
-    if (!config.hasRequiredFields()) {
-      return null
-    }
-
     return try {
+      if (FirebaseApp.getApps(context).isNotEmpty()) {
+        FirebaseMessaging.getInstance().isAutoInitEnabled = true
+        PushSignalDevLog.add(DevLogLevel.SUCCESS, "init", "Firebase уже инициализирован")
+        return null
+      }
+
+      if (!config.hasRequiredFields()) {
+        return null
+      }
+
       val options =
         FirebaseOptions.Builder()
           .setProjectId(config.project_id!!.trim())
@@ -891,16 +921,17 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
       FirebaseMessaging.getInstance().isAutoInitEnabled = true
       PushSignalDevLog.add(DevLogLevel.SUCCESS, "init", "Firebase инициализирован", config.project_id)
       null
-    } catch (error: Exception) {
+    } catch (error: Throwable) {
+      // Throwable: a Firebase/GMS version clash surfaces as LinkageError.
       PushSignalDevLog.add(DevLogLevel.ERROR, "init", "Ошибка инициализации Firebase", error.message)
-      error
+      error as? Exception ?: PushSignalException("E_INIT", error.message ?: error.javaClass.name, error)
     }
   }
 
   private fun finishInitialize(error: Exception?) {
     val waiters = initializeWaiters.toList()
     initializeWaiters.clear()
-    waiters.forEach { it(error) }
+    waiters.forEach { waiter -> guard("finishInitialize") { waiter(error) } }
   }
 
   private fun emitPress(message: PushMessage) {
@@ -913,7 +944,7 @@ internal object PushSignalCenter : Application.ActivityLifecycleCallbacks {
     val listener = onNotificationPress
     Log.d(TAG, "[tap] emitPress: id=${message.id}, listenerBound=${listener != null}, ready=$ready")
     if (listener != null && ready) {
-      listener(message)
+      guard("emitPress.listener") { listener(message) }
     } else {
       synchronized(lock) {
         pendingPresses.addLast(message)
@@ -996,7 +1027,8 @@ private fun Application.currentActivityOrNull(): Activity? {
       }
       recordClass.getDeclaredField("activity").apply { isAccessible = true }.get(record) as? Activity
     }
-  } catch (_: Exception) {
+  } catch (_: Throwable) {
+    // Hidden-API reflection: may be blocked or shaped differently on some ROMs.
     null
   }
 }
